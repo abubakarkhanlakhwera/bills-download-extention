@@ -76,7 +76,14 @@ function findButtonByText(text) {
     'button, input[type="button"], input[type="submit"], a[href], [role="button"]'
   );
   for (const el of candidates) {
-    const label = (el.textContent || el.value || el.getAttribute('aria-label') || '').toLowerCase();
+    const label = (
+      el.textContent ||
+      el.value ||
+      el.getAttribute('aria-label') ||
+      el.getAttribute('mattooltip') ||
+      el.getAttribute('title') ||
+      ''
+    ).toLowerCase();
     if (label.includes(t)) return el;
   }
   return null;
@@ -223,6 +230,8 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
     await waitFor(() => {
       exportBtn = findButtonByText('export bills')
                || findButtonByText('export bill')
+               || document.querySelector('button[mattooltip*="Export"]')
+               || document.querySelector('button[title*="Export"]')
                || findButtonByText('export');
       return exportBtn !== null;
     }, 12000);
