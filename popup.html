@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Water Bill Downloader</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 340px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f4f6f9;
+      color: #333;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #3d2b5e, #5a3e82);
+      color: #fff;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header img { width: 22px; height: 22px; }
+    .header h1 { font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
+    .header p  { font-size: 10px; opacity: 0.8; margin-top: 1px; }
+
+    /* ── Body ── */
+    .body { padding: 16px; }
+
+    .field { margin-bottom: 13px; }
+
+    label {
+      display: block;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #4a4a6a;
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    label .req { color: #e53935; margin-left: 2px; }
+
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1.5px solid #d1d5e0;
+      border-radius: 6px;
+      font-size: 13px;
+      background: #fff;
+      color: #222;
+      cursor: pointer;
+      appearance: auto;
+      transition: border-color 0.2s;
+    }
+    select:focus  { outline: none; border-color: #3d2b5e; }
+    select:hover  { border-color: #a08abf; }
+
+    /* ── Divider ── */
+    .divider {
+      border: none;
+      border-top: 1px solid #e0e3eb;
+      margin: 14px 0;
+    }
+
+    /* ── Buttons ── */
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 9px 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-refresh {
+      background: #e8e4f2;
+      color: #3d2b5e;
+      flex: 0 0 auto;
+      padding: 9px 12px;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .btn-refresh:hover:not(:disabled) { background: #d5cde8; }
+
+    .btn-download {
+      background: #3d2b5e;
+      color: #fff;
+    }
+    .btn-download:hover:not(:disabled) { background: #2d1f4a; }
+
+    /* ── Status bar ── */
+    .status {
+      margin-top: 11px;
+      padding: 8px 11px;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      display: none;
+    }
+    .status.info    { display: block; background: #e8f0fe; color: #1a56cc; border-left: 3px solid #1a56cc; }
+    .status.success { display: block; background: #e6f4ea; color: #1e7e34; border-left: 3px solid #28a745; }
+    .status.error   { display: block; background: #fce8e6; color: #c0392b; border-left: 3px solid #e74c3c; }
+    .status.running { display: block; background: #fff8e1; color: #795500; border-left: 3px solid #f9a825; }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 8px 16px 10px;
+      font-size: 10.5px;
+      color: #999;
+      text-align: center;
+      border-top: 1px solid #e8eaf0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <img src="icons/icon48.png" alt="icon" />
+    <div>
+      <h1>Water Bill Downloader</h1>
+      <p>Select options &amp; click Download</p>
+    </div>
+  </div>
+
+  <div class="body">
+
+    <div class="field">
+      <label>Financial Year <span class="req">*</span></label>
+      <select id="financialYear">
+        <option value="">— Select Financial Year —</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Billing Period <span class="req">*</span></label>
+      <select id="billingPeriod">
+        <option value="">— Select Billing Period —</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Billing Duration <span class="req">*</span></label>
+      <select id="billingDuration">
+        <option value="">— Select Billing Duration —</option>
+      </select>
+    </div>
+
+    <hr class="divider" />
+
+    <div class="btn-row">
+      <button class="btn btn-refresh" id="refreshBtn" title="Reload options from page">&#8635;</button>
+      <button class="btn btn-download" id="downloadBtn">⬇&nbsp; Download Water Bill</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+  </div>
+
+  <div class="footer">
+    Opens on the Water Bill portal for best results.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
