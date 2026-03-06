@@ -1,21 +1,27 @@
 /**
  * content.js – Water Bill Downloader
  *
- * Injected into every page. Listens for two messages from popup.js:
+ * Injected on demand (and also via manifest). The guard at the top
+ * prevents duplicate listener registration if injected more than once.
  *
- *  • { action: 'getDropdownOptions' }
- *      → Reads the Financial Year / Billing Period / Billing Duration
- *        <select> elements on the page and returns their option lists.
+ * Listens for two messages from popup.js:
  *
+ *  • { action: 'getDropdownOptions' }  (legacy – now handled inline)
  *  • { action: 'startDownload', data: { financialYear, billingPeriod, billingDuration } }
  *      → Automates the full workflow:
  *          1. Set Financial Year
  *          2. Set Billing Period
  *          3. Set Billing Duration
  *          4. Click "List Bill"
- *          5. Wait for the results table (3.5 s)
+ *          5. Wait for the results table
  *          6. Click "Export Bills"
  */
+
+// ── Guard: skip re-registration if already injected ──────────────────────────
+if (window.__waterBillExtensionLoaded) {
+  // Already running – nothing to do.
+} else {
+window.__waterBillExtensionLoaded = true;
 
 /* ════════════════════════════════════════
    DOM helpers
@@ -241,3 +247,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false; // No further async response needed
   }
 });
+
+} // end of window.__waterBillExtensionLoaded guard

@@ -2,11 +2,11 @@
  * popup.js – Water Bill Downloader extension
  *
  * Flow:
- *  1. On open → ask content script for page's dropdown options.
+ *  1. On open → inject inline script into the active tab to read dropdown options.
  *  2. Populate local <select> elements; restore previously-saved selections.
  *  3. Auto-save on every change.
  *  4. "Refresh" button → re-fetch options from the live page.
- *  5. "Download" button → validate → tell content script to start automation.
+ *  5. "Download" button → validate → inject content.js then trigger automation.
  */
 
 const STORAGE_KEY = 'waterBillSettings';
@@ -74,30 +74,64 @@ function loadSaved() {
 }
 
 /* ────────────────────────────────────────
-   Ask the content script for dropdown options
+   Read dropdown options directly from the tab via scripting API.
+   This works even if the content script hasn't been injected yet.
 ──────────────────────────────────────── */
 async function fetchOptionsFromPage() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) throw new Error('No active tab found.');
-
-  // chrome:// pages cannot receive messages – avoid trying
   if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://'))) {
     throw new Error('Cannot access browser internal pages.');
   }
 
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tab.id, { action: 'getDropdownOptions' }, response => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      if (!response || !response.success) {
-        reject(new Error(response?.error || 'No water bill dropdowns found on this page.'));
-        return;
-      }
-      resolve(response.options);
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: function () {
+        function findSelect(keyword) {
+          const kw = keyword.toLowerCase();
+          for (const sel of document.querySelectorAll('select')) {
+            if (sel.options.length > 0 && sel.options[0].text.toLowerCase().includes(kw)) return sel;
+          }
+          for (const label of document.querySelectorAll('label')) {
+            if (label.textContent.toLowerCase().includes(kw)) {
+              const forId = label.getAttribute('for');
+              if (forId) { const s = document.getElementById(forId); if (s && s.tagName === 'SELECT') return s; }
+              const child = label.querySelector('select');
+              if (child) return child;
+              const cont = label.closest('div,td,th,li,span') || label.parentElement;
+              if (cont) { const n = cont.querySelector('select'); if (n) return n; }
+            }
+          }
+          return null;
+        }
+        function readOpts(sel) {
+          if (!sel) return [];
+          return Array.from(sel.options).slice(1).map(o => ({ value: o.value, text: o.text.trim() }));
+        }
+        const fy = findSelect('financial year');
+        const bp = findSelect('billing period');
+        const bd = findSelect('billing duration');
+        if (!fy && !bp && !bd) return { success: false, error: 'No water bill dropdowns found on this page.' };
+        return {
+          success: true,
+          options: {
+            financialYear:   readOpts(fy),
+            billingPeriod:   readOpts(bp),
+            billingDuration: readOpts(bd),
+          },
+        };
+      },
     });
-  });
+  } catch (e) {
+    throw new Error('Cannot inject into this page: ' + e.message);
+  }
+
+  const result = results && results[0] && results[0].result;
+  if (!result) throw new Error('Script returned no result.');
+  if (!result.success) throw new Error(result.error);
+  return result.options;
 }
 
 /* ────────────────────────────────────────
@@ -170,6 +204,13 @@ document.getElementById('downloadBtn').addEventListener('click', async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || !tab.id) throw new Error('No active tab.');
+
+    // Inject content.js on demand (guard inside the file prevents double-registration)
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+    } catch (_) {
+      // Ignore – already injected via manifest declaration
+    }
 
     chrome.tabs.sendMessage(
       tab.id,
