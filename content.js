@@ -83,13 +83,18 @@ function findButtonByText(text) {
 }
 
 /**
- * Set a <select>'s value and fire the change/input events so that any
- * framework listeners (Vue, Angular, plain JS) react correctly.
+ * Set a <select>'s value in a way that Angular / React / Vue all pick up.
+ * Using the native HTMLSelectElement property setter bypasses framework
+ * wrappers so the synthetic 'change' event is treated as a real user action.
  */
 function setSelectValue(select, value) {
-  select.value = value;
-  select.dispatchEvent(new Event('change', { bubbles: true }));
+  // Native setter trick – required for Angular ngModel two-way binding
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    window.HTMLSelectElement.prototype, 'value'
+  ).set;
+  nativeSetter.call(select, value);
   select.dispatchEvent(new Event('input',  { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 /**
@@ -124,44 +129,79 @@ function readOptions(select) {
 /* ════════════════════════════════════════
    Automation
 ════════════════════════════════════════ */
-async function automateDownload(financialYear, billingPeriod, billingDuration) {
+async function automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText) {
 
   /* ── Step 1: Financial Year ── */
   const fySelect = findSelectByKeyword('financial year');
   if (!fySelect) throw new Error('Financial Year dropdown not found on this page.');
   setSelectValue(fySelect, financialYear);
-  await delay(600);
+  // Wait 1 s — Angular clears BP/BD after FY change
+  await delay(1000);
 
-  /* ── Step 2: Billing Period ──
-     Some portals reload Billing Period options after FY change via AJAX.
-     Wait up to 6 s for at least one real option to appear, then set. */
+  /* ── Step 2: Billing Period ── */
   const bpSelect = findSelectByKeyword('billing period');
   if (!bpSelect) throw new Error('Billing Period dropdown not found on this page.');
-  await waitFor(() => bpSelect.options.length > 1, 6000).catch(() => {/* proceed anyway */});
+  await waitFor(() => bpSelect.options.length > 1, 5000).catch(() => {});
   setSelectValue(bpSelect, billingPeriod);
-  await delay(600);
+  // Give Angular 800 ms to clear BD before polling for its AJAX reload
+  await delay(800);
 
-  /* ── Step 3: Billing Duration ──
-     Same AJAX pattern possible. */
+  /* ── Step 3: Billing Duration (AJAX-loaded after BP change) ── */
   const bdSelect = findSelectByKeyword('billing duration');
   if (!bdSelect) throw new Error('Billing Duration dropdown not found on this page.');
-  await waitFor(() => bdSelect.options.length > 1, 6000).catch(() => {/* proceed anyway */});
-  setSelectValue(bdSelect, billingDuration);
-  await delay(600);
+
+  // Wait up to 12 s for BD options to load via AJAX
+  await waitFor(() => bdSelect.options.length > 1, 12000).catch(() => {});
+
+  if (bdSelect.options.length <= 1) {
+    throw new Error('Billing Duration options did not load — AJAX may have timed out.');
+  }
+
+  // ── NEW: match by visible text (Angular re-generates value indices each render) ──
+  const normalise = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const targetText = normalise(billingDurationText);
+
+  let matchedIndex = -1;
+  for (let i = 1; i < bdSelect.options.length; i++) {
+    if (normalise(bdSelect.options[i].text) === targetText) {
+      matchedIndex = i;
+      break;
+    }
+  }
+
+  // Fallback: also try matching by saved value string in case it hasn't changed
+  if (matchedIndex === -1) {
+    for (let i = 1; i < bdSelect.options.length; i++) {
+      if (bdSelect.options[i].value === billingDuration) {
+        matchedIndex = i;
+        break;
+      }
+    }
+  }
+
+  if (matchedIndex === -1) {
+    const available = Array.from(bdSelect.options).slice(1).map(o => o.text).join(' | ');
+    throw new Error(
+      `Billing Duration "${billingDurationText || billingDuration}" not found. ` +
+      `Available: ${available}`
+    );
+  }
+
+  // Select by index — Angular always honours selectedIndex changes
+  bdSelect.selectedIndex = matchedIndex;
+  bdSelect.dispatchEvent(new Event('input',  { bubbles: true }));
+  bdSelect.dispatchEvent(new Event('change', { bubbles: true }));
+  await delay(500);
 
   /* ── Step 4: Click "List Bill" ── */
   const listBtn = findButtonByText('list bill');
   if (!listBtn) throw new Error('"List Bill" button not found on this page.');
   listBtn.click();
 
-  /* ── Step 5: Wait for the results table to appear (up to 15 s) ──
-     We look for a <table> or any element with class/id hinting at results.
-     Fallback: just wait 4 s. */
+  /* ── Step 5: Wait for the results table (up to 15 s) ── */
   let tableFound = false;
   try {
     await waitFor(() => {
-      // Common patterns: a <table> with more than the header row,
-      // or a container that wasn't there before.
       const tables = document.querySelectorAll('table');
       for (const tbl of tables) {
         if (tbl.rows.length > 1) { tableFound = true; return true; }
@@ -169,34 +209,25 @@ async function automateDownload(financialYear, billingPeriod, billingDuration) {
       return false;
     }, 15000);
   } catch {
-    // Table didn't appear – still try to click Export after base delay
     await delay(4000);
   }
 
-  if (tableFound) {
-    // A little extra buffer to ensure the Export button has rendered
-    await delay(1000);
-  }
+  if (tableFound) await delay(1000);
 
-  /* ── Step 6: Tell background to tag the next download ── */
+  /* ── Step 6: Tag next download ── */
   chrome.runtime.sendMessage({ action: 'prepareDownload' });
 
-  /* ── Step 7: Click "Export Bills" ──
-     The button may only exist after the table loads, so poll for it. */
+  /* ── Step 7: Click "Export Bills" ── */
   let exportBtn = null;
   try {
     await waitFor(() => {
-      // Try several common label variants
       exportBtn = findButtonByText('export bills')
                || findButtonByText('export bill')
                || findButtonByText('export');
       return exportBtn !== null;
     }, 12000);
   } catch {
-    throw new Error(
-      '"Export Bills" button not found. ' +
-      'The table may not have loaded — try increasing the wait time or check the page manually.'
-    );
+    throw new Error('"Export Bills" button not found. The table may not have loaded.');
   }
 
   exportBtn.click();
@@ -231,20 +262,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   /* ── Start download automation ── */
   if (message.action === 'startDownload') {
-    const { financialYear, billingPeriod, billingDuration } = message.data || {};
+    const { financialYear, billingPeriod, billingDuration, billingDurationText } = message.data || {};
 
     // Respond immediately so the popup doesn't hang waiting
     sendResponse({ success: true });
 
     // Run automation independently in the background
-    automateDownload(financialYear, billingPeriod, billingDuration)
+    automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText)
       .catch(err => {
         console.error('[WaterBillDownloader] Automation error:', err.message);
-        // Attempt to surface the error via the background (badge / notification)
         chrome.runtime.sendMessage({ action: 'automationError', error: err.message });
       });
 
-    return false; // No further async response needed
+    return false;
   }
 });
 
