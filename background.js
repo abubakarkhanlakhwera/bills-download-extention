@@ -1,300 +1,228 @@
-/**
- * background.js – Water Bill Downloader (MV3 Service Worker)
- *
- * Responsibilities:
- *  1. Receive 'prepareDownload' signal from the content script.
- *  2. On the next download, rename the file to:
- *       WaterBills/DD-MM-YYYY_HH-MM-SS.<ext>
- *     (stored in the user's default Downloads/WaterBills/ directory).
- *  3. Once that download completes, delete the PREVIOUS water-bill file
- *     so only the latest one is kept.
- *  4. Show a desktop notification on success or error.
- *
- * State keys in chrome.storage.local (persistent across browser restarts):
- *   lastWaterBillDownloadId  – chrome.downloads ID of the previous bill file
- *
- * State keys in chrome.storage.session (cleared when browser closes):
- *   pendingWaterBillDownload – boolean flag: tag the NEXT download as a water bill
- *   currentWaterBillDownloadId – download ID currently being tracked
- */
+﻿let panelWindowId = null;
+const PANEL_WIDTH = 640;
+const PANEL_HEIGHT = 820;
+let billingDownloadCounter = 0;
+let lastBillingDownloadAt = 0;
+let activeAutomationTabId = null;
 
-/* ════════════════════════════════════════
-   Helper: zero-pad a number to 2 digits
-════════════════════════════════════════ */
-const pad = n => String(n).padStart(2, '0');
-
-/* ════════════════════════════════════════
-   Helper: build the destination filename
-════════════════════════════════════════ */
-function buildFilename(originalFilename) {
-  const now = new Date();
-  const dd   = pad(now.getDate());
-  const mm   = pad(now.getMonth() + 1);
-  const yyyy = now.getFullYear();
-  const HH   = pad(now.getHours());
-  const MIN  = pad(now.getMinutes());
-  const SS   = pad(now.getSeconds());
-
-  // Preserve original extension; default to xlsx
-  const dotIdx = (originalFilename || '').lastIndexOf('.');
-  const ext    = dotIdx > -1 ? originalFilename.substring(dotIdx + 1).toLowerCase() : 'xlsx';
-
-  return `WaterBills/${dd}-${mm}-${yyyy}_${HH}-${MIN}-${SS}.${ext}`;
+function isBillingUrl(value) {
+  const text = String(value || "").toLowerCase();
+  return text.includes("elgcd.punjab.gov.pk");
 }
 
-/* ════════════════════════════════════════
-   Helper: show a desktop notification
-════════════════════════════════════════ */
-function notify(title, message) {
-  chrome.notifications.create({
-    type:     'basic',
-    iconUrl:  'icons/icon48.png',
-    title,
-    message,
-    priority: 1,
-  });
+function isWaterBillsFileName(value) {
+  return /[\\/]WaterBills[\\/]/i.test(String(value || ""));
 }
 
-/* ════════════════════════════════════════
-   Download log – keep last 5 entries
-════════════════════════════════════════ */
-const LOG_KEY = 'waterBillDownloadLog';
-
-function addDownloadLog(filename, timestamp) {
-  chrome.storage.local.get(LOG_KEY, data => {
-    const log = data[LOG_KEY] || [];
-    log.unshift({ filename, timestamp });
-    chrome.storage.local.set({ [LOG_KEY]: log.slice(0, 5) });
-  });
-}
-
-/* ════════════════════════════════════════
-   Time-range helper for the scheduler
-════════════════════════════════════════ */
-function isInTimeRange(startTime, endTime) {
-  if (!startTime || !endTime) return true;
-  const now = new Date();
-  const cur   = now.getHours() * 60 + now.getMinutes();
-  const [sh, sm] = startTime.split(':').map(Number);
-  const [eh, em] = endTime.split(':').map(Number);
-  const start = sh * 60 + sm;
-  const end   = eh * 60 + em;
-  // Overnight range (e.g. 22:00 – 06:00)
-  if (start > end) return cur >= start || cur <= end;
-  return cur >= start && cur <= end;
-}
-
-/* ════════════════════════════════════════
-   Message listener
-   – 'prepareDownload'   : set the pending flag so the next download is captured
-   – 'automationError'   : surface content-script errors to the user
-   – 'downloadDataUrl'   : explicit download from a blob intercepted in content.js
-════════════════════════════════════════ */
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.action === 'prepareDownload') {
-    chrome.storage.session.set({ pendingWaterBillDownload: true });
-  }
-
-  if (message.action === 'automationError') {
-    notify('Water Bill – Automation Error', message.error || 'An unknown error occurred.');
-  }
-
-  // Explicit download initiated by the blob-URL interceptor in content.js.
-  // data-URLs are accessible from the service worker, unlike blob: URLs.
-  if (message.action === 'downloadDataUrl') {
-    // Clear the pending flag – we are handling this download ourselves.
-    chrome.storage.session.remove('pendingWaterBillDownload');
-    const filename = buildFilename(message.originalFilename || 'water_bill.xlsx');
-    chrome.downloads.download(
-      { url: message.dataUrl, filename, conflictAction: 'uniquify', saveAs: false },
-      downloadId => {
-        if (chrome.runtime.lastError) {
-          notify('Water Bill Download Error', chrome.runtime.lastError.message);
-          return;
-        }
-        // Tag this download so onChanged can log + clean up the previous one
-        chrome.storage.session.set({ currentWaterBillDownloadId: downloadId });
+function cleanupOldWaterBillsFiles(keepId) {
+  chrome.downloads.search({ filenameRegex: "[\\\\/]WaterBills[\\\\/].*" }, (items) => {
+    for (const item of items || []) {
+      if (!item || item.id === keepId || item.state !== "complete") {
+        continue;
       }
-    );
-  }
-});
 
-/* ════════════════════════════════════════
-   Download filename interception
-   Called by Chrome before a download is saved. We rename water-bill files
-   to our standard path and mark their ID for later cleanup.
-════════════════════════════════════════ */
-chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-  // PRIMARY: check if this download was initiated from the portal tab.
-  // This is reliable regardless of service-worker sleep timing.
-  chrome.tabs.query({ url: '*://elgcd.punjab.gov.pk/*' }, tabs => {
-    const isFromPortal = tabs.some(t => t.id === downloadItem.tabId);
-
-    if (isFromPortal) {
-      // Definitely our water-bill export — rename it.
-      const newFilename = buildFilename(downloadItem.filename);
-      chrome.storage.session.set({ currentWaterBillDownloadId: downloadItem.id });
-      chrome.storage.session.remove('pendingWaterBillDownload'); // clean up flag
-      suggest({ filename: newFilename, conflictAction: 'uniquify' });
-      return;
+      chrome.downloads.removeFile(item.id, () => {
+        // Ignore file deletion errors (file may already be missing/locked).
+      });
+      chrome.downloads.erase({ id: item.id }, () => {
+        // Keep history clean and leave only the latest file entry.
+      });
     }
+  });
+}
 
-    // FALLBACK: check the pending flag (handles edge cases where tabId is 0/-1)
-    chrome.storage.session.get(['pendingWaterBillDownload'], data => {
-      if (!data.pendingWaterBillDownload) {
-        suggest(); // not our download
+function openOrFocusPanel() {
+  const panelUrl = chrome.runtime.getURL("panel.html");
+
+  if (typeof panelWindowId === "number") {
+    chrome.windows.get(panelWindowId, {}, (existingWindow) => {
+      if (chrome.runtime.lastError || !existingWindow) {
+        panelWindowId = null;
+        openOrFocusPanel();
         return;
       }
-      chrome.storage.session.remove('pendingWaterBillDownload');
-      const newFilename = buildFilename(downloadItem.filename);
-      chrome.storage.session.set({ currentWaterBillDownloadId: downloadItem.id });
-      suggest({ filename: newFilename, conflictAction: 'uniquify' });
+
+      chrome.windows.update(panelWindowId, { focused: true, width: PANEL_WIDTH, height: PANEL_HEIGHT });
     });
-  });
-
-  return true; // async suggest()
-});
-
-/* ════════════════════════════════════════
-   Download completion listener
-   When our tagged download completes:
-     • Delete the PREVIOUS water-bill file (if any)
-     • Persist this download's ID as the new "last"
-     • Show a success notification
-════════════════════════════════════════ */
-chrome.downloads.onChanged.addListener(delta => {
-  // Only handle terminal state transitions (complete / interrupted)
-  if (!delta.state) return;
-  if (delta.state.current !== 'complete' && delta.state.current !== 'interrupted') return;
-
-  chrome.storage.session.get(['currentWaterBillDownloadId'], sessionData => {
-    if (delta.id !== sessionData.currentWaterBillDownloadId) return;
-
-    if (delta.state.current === 'complete') {
-      // Record this download in the log
-      chrome.downloads.search({ id: delta.id }, items => {
-        if (items && items[0]) {
-          const rawPath = items[0].filename || '';
-          const fn = rawPath.replace(/\\/g, '/').split('/').pop() || rawPath || 'unknown';
-          addDownloadLog(fn, new Date().toISOString());
-        }
-      });
-
-      // Retrieve the ID of the previously-downloaded water bill
-      chrome.storage.local.get(['lastWaterBillDownloadId'], localData => {
-        const prevId = localData.lastWaterBillDownloadId;
-
-        if (prevId && prevId !== delta.id) {
-          // Delete the old file from disk
-          chrome.downloads.removeFile(prevId, () => {
-            if (chrome.runtime.lastError) {
-              // File may already be missing – not a fatal error
-              console.warn(
-                '[WaterBillDownloader] Could not delete previous file:',
-                chrome.runtime.lastError.message
-              );
-            }
-            // Remove it from the downloads list in Chrome as well
-            chrome.downloads.erase({ id: prevId });
-          });
-        }
-
-        // Persist the new download as "last"
-        chrome.storage.local.set({ lastWaterBillDownloadId: delta.id });
-
-        // Notify the user
-        notify(
-          'Water Bill Downloaded ✓',
-          'Saved to Downloads → WaterBills folder. Previous bill has been removed.'
-        );
-      });
-
-    } else if (delta.state.current === 'interrupted') {
-      notify(
-        'Water Bill Download Failed',
-        'The download was interrupted. Please try again.'
-      );
-    }
-
-    // Always clear the in-session tracking ID once we've handled this download
-    chrome.storage.session.remove('currentWaterBillDownloadId');
-  });
-});
-
-/* ════════════════════════════════════════
-   Extension icon click → open popup as a
-   persistent window (won't auto-close on blur)
-════════════════════════════════════════ */
-chrome.action.onClicked.addListener(() => {
-  chrome.windows.create({
-    url:     chrome.runtime.getURL('popup.html'),
-    type:    'popup',
-    width:   420,
-    height:  820,
-    focused: true,
-  });
-});
-
-/* ════════════════════════════════════════
-   Scheduled auto-download (chrome.alarms)
-════════════════════════════════════════ */
-const PORTAL_URL = 'https://elgcd.punjab.gov.pk/e-billing/water-bill-list';
-
-chrome.alarms.onAlarm.addListener(async alarm => {
-  if (alarm.name !== 'waterBillSchedule') return;
-
-  // Load saved selections and schedule settings
-  const stored = await chrome.storage.local.get(['waterBillSettings', 'waterBillSchedule']);
-  const s     = stored.waterBillSettings;
-  const sched = stored.waterBillSchedule || {};
-
-  if (!s || !s.financialYear || !s.billingPeriod || !s.billingDuration) {
-    notify(
-      'Water Bill Scheduler',
-      'No saved settings found. Open the extension, select options, and click Save Settings first.'
-    );
     return;
   }
 
-  // Honour the time-range window if one is configured
-  if (sched.startTime && sched.endTime) {
-    if (!isInTimeRange(sched.startTime, sched.endTime)) {
-      // Outside the allowed window – skip silently
-      return;
-    }
-  }
-
-  // Find an existing portal tab; otherwise open a new one
-  const tabs = await chrome.tabs.query({ url: '*://elgcd.punjab.gov.pk/*' });
-  let tab = tabs[0];
-  if (!tab) {
-    tab = await chrome.tabs.create({ url: PORTAL_URL, active: false });
-    // Wait for the page to fully load
-    await new Promise(resolve => {
-      chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-        if (tabId === tab.id && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      });
-    });
-    // Extra wait for Angular to render
-    await new Promise(r => setTimeout(r, 3000));
-  }
-
-  // Inject content.js (guard inside prevents double-registration)
-  try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-  } catch (_) { /* already injected */ }
-
-  // Trigger automation with saved settings
-  chrome.tabs.sendMessage(tab.id, {
-    action: 'startDownload',
-    data: {
-      financialYear:       s.financialYear,
-      billingPeriod:       s.billingPeriod,
-      billingDuration:     s.billingDuration,
-      billingDurationText: s.billingDurationText || '',
+  chrome.windows.create(
+    {
+      url: panelUrl,
+      type: "popup",
+      width: PANEL_WIDTH,
+      height: PANEL_HEIGHT,
+      focused: true
     },
+    (newWindow) => {
+      if (!newWindow || typeof newWindow.id !== "number") {
+        return;
+      }
+      panelWindowId = newWindow.id;
+    }
+  );
+}
+
+chrome.action.onClicked.addListener(() => {
+  openOrFocusPanel();
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === panelWindowId) {
+    panelWindowId = null;
+  }
+});
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  const url = String(item.finalUrl || item.url || "").toLowerCase();
+  const referrer = String(item.referrer || "").toLowerCase();
+  const filename = item.filename || "";
+  const isBillingDownload =
+    (typeof item.tabId === "number" && item.tabId === activeAutomationTabId) ||
+    url.includes("elgcd.punjab.gov.pk") ||
+    referrer.includes("elgcd.punjab.gov.pk/e-billing/water-bill-list");
+
+  if (!isBillingDownload) {
+    suggest();
+    return;
+  }
+
+  const safeName = filename.split(/[\\/]/).pop() || `water-bills-${Date.now()}.xlsx`;
+  const dot = safeName.lastIndexOf(".");
+  const base = dot > 0 ? safeName.slice(0, dot) : safeName;
+  const ext = dot > 0 ? safeName.slice(dot) : ".xlsx";
+
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, "0");
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yy = String(now.getFullYear()).slice(-2);
+  const datePart = `${dd}-${mm}-${yy}`;
+
+  suggest({
+    filename: `WaterBills/${datePart}_${base}${ext}`,
+    conflictAction: "overwrite"
   });
 });
+
+chrome.downloads.onCreated.addListener((item) => {
+  const fromAutomationTab = typeof item.tabId === "number" && item.tabId === activeAutomationTabId;
+  if (fromAutomationTab || isBillingUrl(item.finalUrl) || isBillingUrl(item.url) || isBillingUrl(item.referrer)) {
+    billingDownloadCounter += 1;
+    lastBillingDownloadAt = Date.now();
+  }
+});
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!delta || typeof delta.id !== "number" || !delta.state || delta.state.current !== "complete") {
+    return;
+  }
+
+  chrome.downloads.search({ id: delta.id }, (items) => {
+    const item = items && items[0];
+    if (!item || !isWaterBillsFileName(item.filename)) {
+      return;
+    }
+
+    cleanupOldWaterBillsFiles(item.id);
+  });
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || !message.type) {
+    return false;
+  }
+
+  if (message.type === "REAL_CLICK_EXPORT") {
+    const tabId = _sender && _sender.tab && _sender.tab.id;
+    const x = Number(message.x);
+    const y = Number(message.y);
+
+    if (typeof tabId !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) {
+      sendResponse({ ok: false, reason: "Invalid tab or coordinates for native click." });
+      return false;
+    }
+
+    const target = { tabId };
+    chrome.debugger.attach(target, "1.3", () => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, reason: chrome.runtime.lastError.message || "Debugger attach failed." });
+        return;
+      }
+
+      const finish = (result) => {
+        chrome.debugger.detach(target, () => {
+          sendResponse(result);
+        });
+      };
+
+      chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y,
+        button: "left",
+        clickCount: 1
+      }, () => {
+        if (chrome.runtime.lastError) {
+          finish({ ok: false, reason: chrome.runtime.lastError.message || "mouseMoved failed." });
+          return;
+        }
+
+        chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x,
+          y,
+          button: "left",
+          clickCount: 1
+        }, () => {
+          if (chrome.runtime.lastError) {
+            finish({ ok: false, reason: chrome.runtime.lastError.message || "mousePressed failed." });
+            return;
+          }
+
+          chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x,
+            y,
+            button: "left",
+            clickCount: 1
+          }, () => {
+            if (chrome.runtime.lastError) {
+              finish({ ok: false, reason: chrome.runtime.lastError.message || "mouseReleased failed." });
+              return;
+            }
+
+            finish({ ok: true });
+          });
+        });
+      });
+    });
+
+    return true;
+  }
+
+  if (message.type === "SET_AUTOMATION_TAB") {
+    activeAutomationTabId = typeof message.tabId === "number" ? message.tabId : null;
+    sendResponse({ ok: true, activeAutomationTabId });
+    return false;
+  }
+
+  if (message.type === "CLEAR_AUTOMATION_TAB") {
+    activeAutomationTabId = null;
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type !== "GET_BILLING_DOWNLOAD_COUNTER") {
+    return false;
+  }
+
+  sendResponse({
+    ok: true,
+    counter: billingDownloadCounter,
+    lastAt: lastBillingDownloadAt,
+    activeAutomationTabId
+  });
+  return false;
+});
+

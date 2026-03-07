@@ -1,34 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "Water Bill Downloader",
-  "version": "1.0",
-  "description": "Automate water bill selection, listing and export download with auto-rename and cleanup.",
-  "permissions": [
-    "storage",
-    "downloads",
-    "activeTab",
-    "scripting",
-    "tabs",
-    "notifications",
-    "alarms"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "name": "Water Bill Dropdown Saver",
+  "version": "1.0.0",
+  "description": "Extracts and stores the first three dropdown values from the water bill page (first-time only).",
+  "permissions": ["storage", "tabs", "scripting", "activeTab", "downloads", "debugger"],
+  "host_permissions": ["https://elgcd.punjab.gov.pk/*"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Water Bill Downloader",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
+    "default_title": "Open Saved Dropdown Panel"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["https://elgcd.punjab.gov.pk/e-billing/water-bill-list*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

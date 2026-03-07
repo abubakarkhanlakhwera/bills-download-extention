@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Saved Dropdown Data</title>
+  <title>Saved Dropdown Data Panel</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -18,6 +18,20 @@
       <button id="refreshBtn" type="button">Refresh</button>
       <button id="clearBtn" type="button" class="danger">Clear Saved Data</button>
       <button id="closeBtn" type="button" class="muted">Close</button>
+    </section>
+
+    <section class="run-controls">
+      <label for="delayValue">Delay Value</label>
+      <input id="delayValue" type="number" min="1" value="1500">
+      <label for="delayUnit">Delay Unit</label>
+      <select id="delayUnit" aria-label="Delay Unit">
+        <option value="ms" selected>Milliseconds</option>
+        <option value="sec">Seconds</option>
+        <option value="min">Minutes</option>
+        <option value="hour">Hours</option>
+      </select>
+      <button id="runListBillBtn" type="button">Run List Bill</button>
+      <button id="stopListBillBtn" type="button" class="muted">Stop</button>
     </section>
 
     <section id="status" class="status"></section>

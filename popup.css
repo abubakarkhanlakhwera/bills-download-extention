@@ -1,0 +1,174 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+}
+
+body {
+  margin: 0;
+  width: 600px;
+  min-height: 320px;
+  background: #f4f7f2;
+  color: #1b1b1b;
+}
+
+.app {
+  padding: 12px;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.sub {
+  margin: 4px 0 10px;
+  font-size: 12px;
+  color: #4a4a4a;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.run-controls label {
+  min-width: 74px;
+}
+
+.run-controls input,
+.run-controls select {
+  min-width: 150px;
+}
+
+.run-controls button {
+  min-width: 92px;
+}
+
+.run-controls input {
+  width: 100%;
+  border: 1px solid #c7d0bd;
+  border-radius: 5px;
+  padding: 5px 6px;
+  font-size: 12px;
+}
+
+.run-controls select {
+  width: 100%;
+  border: 1px solid #c7d0bd;
+  border-radius: 5px;
+  padding: 5px 6px;
+  font-size: 12px;
+  background: #fff;
+}
+
+.run-controls label {
+  color: #3e3e3e;
+}
+
+button {
+  border: 1px solid #4f8e2f;
+  background: #4f8e2f;
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #447b29;
+}
+
+button.danger {
+  border-color: #a43939;
+  background: #a43939;
+}
+
+button.danger:hover {
+  background: #8f2f2f;
+}
+
+button.muted {
+  border-color: #788070;
+  background: #788070;
+}
+
+button.muted:hover {
+  background: #676e60;
+}
+
+.status {
+  font-size: 12px;
+  margin-bottom: 10px;
+  color: #2d2d2d;
+}
+
+.content {
+  display: grid;
+  gap: 10px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #d8ded2;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.card h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.meta {
+  font-size: 11px;
+  color: #4f4f4f;
+  margin: 0 0 8px;
+}
+
+.selected-text {
+  color: #0b6b2f;
+  font-weight: 700;
+}
+
+.selected-value {
+  color: #1e4fb6;
+  font-weight: 700;
+}
+
+.options-wrap {
+  border: 1px solid #d8ded2;
+  border-radius: 6px;
+  background: #fbfdf9;
+  padding: 4px;
+}
+
+.options-select {
+  width: 100%;
+  border: 1px solid #cbd4c2;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #2d2d2d;
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 3px;
+}
+
+.empty {
+  font-size: 12px;
+  background: #fff;
+  border: 1px dashed #c5ccb8;
+  border-radius: 8px;
+  padding: 10px;
+}

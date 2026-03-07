@@ -1,380 +1,566 @@
-/**
- * content.js – Water Bill Downloader
- *
- * Injected on demand (and also via manifest). The guard at the top
- * prevents duplicate listener registration if injected more than once.
- *
- * Listens for two messages from popup.js:
- *
- *  • { action: 'getDropdownOptions' }  (legacy – now handled inline)
- *  • { action: 'startDownload', data: { financialYear, billingPeriod, billingDuration } }
- *      → Automates the full workflow:
- *          1. Set Financial Year
- *          2. Set Billing Period
- *          3. Set Billing Duration
- *          4. Click "List Bill"
- *          5. Wait for the results table
- *          6. Click "Export Bills"
- */
-
-// ── Guard: skip re-registration if already injected ──────────────────────────
-if (window.__waterBillExtensionLoaded) {
-  // Already running – nothing to do.
-} else {
-window.__waterBillExtensionLoaded = true;
-
-/* ════════════════════════════════════════
-   DOM helpers
-════════════════════════════════════════ */
-
-/**
- * Find a <select> whose first placeholder option text contains `keyword`.
- * Also falls back to finding a <label> whose text contains `keyword`
- * and then locating the nearest <select>.
- */
-function findSelectByKeyword(keyword) {
-  const kw = keyword.toLowerCase();
-
-  // Primary: match placeholder option text  (e.g. "Select Financial Year")
-  for (const sel of document.querySelectorAll('select')) {
-    if (sel.options.length > 0 && sel.options[0].text.toLowerCase().includes(kw)) {
-      return sel;
-    }
+(() => {
+  if (window.__waterBillSaverInitialized) {
+    return;
   }
+  window.__waterBillSaverInitialized = true;
 
-  // Fallback: label text → associated select
-  for (const label of document.querySelectorAll('label')) {
-    if (label.textContent.toLowerCase().includes(kw)) {
-      // Explicit `for` attribute
-      const forId = label.getAttribute('for');
-      if (forId) {
-        const sel = document.getElementById(forId);
-        if (sel && sel.tagName === 'SELECT') return sel;
-      }
-      // Child select
-      const child = label.querySelector('select');
-      if (child) return child;
-      // Sibling/cousin select inside the same parent container
-      const container = label.closest('div, td, th, li, span') || label.parentElement;
-      if (container) {
-        const nearby = container.querySelector('select');
-        if (nearby) return nearby;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Find a clickable element (button / anchor / input) whose visible text
- * contains `text` (case-insensitive).
- */
-function findButtonByText(text) {
-  const t = text.toLowerCase();
-  const candidates = document.querySelectorAll(
-    'button, input[type="button"], input[type="submit"], a[href], [role="button"]'
-  );
-  for (const el of candidates) {
-    const label = (
-      el.textContent ||
-      el.value ||
-      el.getAttribute('aria-label') ||
-      el.getAttribute('mattooltip') ||
-      el.getAttribute('title') ||
-      ''
-    ).toLowerCase();
-    if (label.includes(t)) return el;
-  }
-  return null;
-}
-
-/**
- * Set a <select>'s value in a way that Angular / React / Vue all pick up.
- * Using the native HTMLSelectElement property setter bypasses framework
- * wrappers so the synthetic 'change' event is treated as a real user action.
- */
-function setSelectValue(select, value) {
-  // Native setter trick – required for Angular ngModel two-way binding
-  const nativeSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLSelectElement.prototype, 'value'
-  ).set;
-  nativeSetter.call(select, value);
-  select.dispatchEvent(new Event('input',  { bubbles: true }));
-  select.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-/**
- * Poll until `condition()` is truthy, or reject after `timeout` ms.
- */
-function waitFor(condition, timeout = 8000, interval = 250) {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeout;
-    (function check() {
-      if (condition()) return resolve();
-      if (Date.now() >= deadline) return reject(new Error('Timeout waiting for condition.'));
-      setTimeout(check, interval);
-    })();
-  });
-}
-
-/** Simple delay in milliseconds. */
-const delay = ms => new Promise(r => setTimeout(r, ms));
-
-/* ════════════════════════════════════════
-   Stop / Pause control
-   Checks shared session flags at each automation checkpoint.
-   Throws a special error (.__stopped = true) on Stop so the
-   call-site can silence the error notification.
-════════════════════════════════════════ */
-async function checkControl() {
-  for (;;) {
-    const data = await new Promise(r =>
-      chrome.storage.local.get(['wbdStop', 'wbdPaused'], r)
-    );
-    if (data.wbdStop) {
-      const e = new Error('__STOPPED__');
-      e.__stopped = true;
-      throw e;
-    }
-    if (!data.wbdPaused) break;
-    await delay(400);
-  }
-}
-
-/* ════════════════════════════════════════
-   Read options from a <select>
-════════════════════════════════════════ */
-function readOptions(select) {
-  if (!select) return [];
-  // Skip the first placeholder option (index 0)
-  return Array.from(select.options).slice(1).map(o => ({
-    value: o.value,
-    text:  o.text.trim(),
-  }));
-}
-
-/* ════════════════════════════════════════
-   Automation
-════════════════════════════════════════ */
-async function automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText) {
-  // Broadcast that automation is running so the popup can show Stop/Pause buttons
-  chrome.storage.local.set({ wbdRunning: true, wbdStop: false, wbdPaused: false });
-
-  /* ── Step 1: Financial Year ── */
-  await checkControl();
-  const fySelect = findSelectByKeyword('financial year');
-  if (!fySelect) throw new Error('Financial Year dropdown not found on this page.');
-  setSelectValue(fySelect, financialYear);
-  // Wait 1 s — Angular clears BP/BD after FY change
-  await delay(1000);
-  await checkControl();
-
-  /* ── Step 2: Billing Period ── 
-  const bpSelect = findSelectByKeyword('billing period');
-  if (!bpSelect) throw new Error('Billing Period dropdown not found on this page.');
-  await waitFor(() => bpSelect.options.length > 1, 5000).catch(() => {});
-  setSelectValue(bpSelect, billingPeriod);
-  // Give Angular 800 ms to clear BD before polling for its AJAX reload
-  await delay(800);
-
-  /* ── Step 3: Billing Duration (AJAX-loaded after BP change) ── */
-  const bdSelect = findSelectByKeyword('billing duration');
-  if (!bdSelect) throw new Error('Billing Duration dropdown not found on this page.');
-
-  // Wait up to 12 s for BD options to load via AJAX
-  await waitFor(() => bdSelect.options.length > 1, 12000).catch(() => {});
-
-  if (bdSelect.options.length <= 1) {
-    throw new Error('Billing Duration options did not load — AJAX may have timed out.');
-  }
-
-  // ── NEW: match by visible text (Angular re-generates value indices each render) ──
-  const normalise = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  const targetText = normalise(billingDurationText);
-
-  let matchedIndex = -1;
-  for (let i = 1; i < bdSelect.options.length; i++) {
-    if (normalise(bdSelect.options[i].text) === targetText) {
-      matchedIndex = i;
-      break;
-    }
-  }
-
-  // Fallback: also try matching by saved value string in case it hasn't changed
-  if (matchedIndex === -1) {
-    for (let i = 1; i < bdSelect.options.length; i++) {
-      if (bdSelect.options[i].value === billingDuration) {
-        matchedIndex = i;
-        break;
-      }
-    }
-  }
-
-  if (matchedIndex === -1) {
-    const available = Array.from(bdSelect.options).slice(1).map(o => o.text).join(' | ');
-    throw new Error(
-      `Billing Duration "${billingDurationText || billingDuration}" not found. ` +
-      `Available: ${available}`
-    );
-  }
-
-  // Select by index — Angular always honours selectedIndex changes
-  bdSelect.selectedIndex = matchedIndex;
-  bdSelect.dispatchEvent(new Event('input',  { bubbles: true }));
-  bdSelect.dispatchEvent(new Event('change', { bubbles: true }));
-  await delay(500);
-  await checkControl();
-
-  /* ── Step 4: Click "List Bill" ── */
-  const listBtn = findButtonByText('list bill');
-  if (!listBtn) throw new Error('"List Bill" button not found on this page.');
-  listBtn.click();
-  // Mandatory pause: let the portal clear the old table before we start polling.
-  // Without this, the old loaded table satisfies rows>1 immediately.
-  await delay(2000);
-  await checkControl();
-
-  /* ── Step 5: Wait for the results table (up to 15 s) ── */
-  let tableFound = false;
-  try {
-    await waitFor(() => {
-      const tables = document.querySelectorAll('table');
-      for (const tbl of tables) {
-        if (tbl.rows.length > 1) { tableFound = true; return true; }
-      }
-      return false;
-    }, 15000);
-  } catch {
-    await delay(4000);
-  }
-
-  if (tableFound) await delay(1000);
-  await checkControl();
-
-  /* ── Step 6: Tag next download ── */
-  chrome.runtime.sendMessage({ action: 'prepareDownload' });
-
-  /* ── Step 6b: Intercept programmatic blob-URL downloads ──
-     Angular typically does:
-       const url = URL.createObjectURL(blob);
-       const a = document.createElement('a');
-       a.href = url; a.download = 'file.xlsx'; a.click();
-     We override HTMLAnchorElement.prototype.click to catch this,
-     read the blob as a data-URL (accessible in-page), and send it
-     to the background where chrome.downloads.download() handles it.
-  ── */
-  let _blobIntercepted = false;
-  const _origAnchorClick = HTMLAnchorElement.prototype.click;
-  HTMLAnchorElement.prototype.click = function _interceptDownload() {
-    if (
-      !_blobIntercepted &&
-      this.href &&
-      this.href.startsWith('blob:') &&
-      this.hasAttribute('download')
-    ) {
-      _blobIntercepted = true;
-      HTMLAnchorElement.prototype.click = _origAnchorClick; // restore immediately
-      const blobUrl       = this.href;
-      const origFilename  = this.getAttribute('download') || 'water_bill.xlsx';
-      fetch(blobUrl)
-        .then(r => r.blob())
-        .then(blob => new Promise((res, rej) => {
-          const reader = new FileReader();
-          reader.onload  = () => res(reader.result);
-          reader.onerror = rej;
-          reader.readAsDataURL(blob);
-        }))
-        .then(dataUrl => {
-          chrome.runtime.sendMessage({
-            action: 'downloadDataUrl',
-            dataUrl,
-            originalFilename: origFilename,
-          });
-        })
-        .catch(() => {
-          // Fallback: let the original click proceed (onDeterminingFilename covers it)
-          _origAnchorClick.call(this);
-        });
-      return;
-    }
-    return _origAnchorClick.call(this);
+  const STORAGE_KEY = "waterBillFirstThreeDropdowns";
+  const EXPORT_WAIT_MS = 15000;
+  const EXPORT_RETRY_MS = 1000;
+  const EXPORT_MAX_RETRIES = 40;
+  const EXPORT_DOWNLOAD_CONFIRM_MS = 3000;
+  const LIST_BILL_STATE = {
+    isRunning: false,
+    timerId: null,
+    runId: null,
+    startedAt: null,
+    listClickCount: 0,
+    exportClickCount: 0,
+    lastListClickAt: null,
+    lastExportClickAt: null,
+    intervalMs: 0,
+    nextClickAt: null,
+    phase: "idle",
+    lastError: null
   };
 
-  /* ── Step 7: Click "Export Bills" ── */
-  let exportBtn = null;
-  try {
-    await waitFor(() => {
-      exportBtn = findButtonByText('export bills')
-               || findButtonByText('export bill')
-               || document.querySelector('button[mattooltip*="Export"]')
-               || document.querySelector('button[title*="Export"]')
-               || findButtonByText('export');
-      return exportBtn !== null;
-    }, 12000);
-  } catch {
-    throw new Error('"Export Bills" button not found. The table may not have loaded.');
-  }
+  const TARGET_LABELS = ["Financial Year", "Billing Period", "Billing Duration"];
 
-  exportBtn.click();
-
-  // Safety cleanup: restore click prototype if blob was never seen
-  // (e.g. the portal uses a direct URL download instead of a blob)
-  setTimeout(() => {
-    if (!_blobIntercepted) {
-      HTMLAnchorElement.prototype.click = _origAnchorClick;
-    }
-  }, 15000);
-}
-
-/* ════════════════════════════════════════
-   Message listener
-════════════════════════════════════════ */
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-
-  /* ── Get dropdown options ── */
-  if (message.action === 'getDropdownOptions') {
-    const fySelect = findSelectByKeyword('financial year');
-    const bpSelect = findSelectByKeyword('billing period');
-    const bdSelect = findSelectByKeyword('billing duration');
-
-    if (!fySelect && !bpSelect && !bdSelect) {
-      sendResponse({ success: false, error: 'No water bill dropdowns found on this page.' });
-      return true;
+  function safeCssEscape(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
     }
 
-    sendResponse({
-      success: true,
-      options: {
-        financialYear:  readOptions(fySelect),
-        billingPeriod:  readOptions(bpSelect),
-        billingDuration: readOptions(bdSelect),
-      },
-    });
-    return true;
+    return String(value).replace(/([#.;?+*~\':"!^$\[\]()=>|/\\@])/g, "\\$1");
   }
 
-  /* ── Start download automation ── */
-  if (message.action === 'startDownload') {
-    const { financialYear, billingPeriod, billingDuration, billingDurationText } = message.data || {};
+  function getOptionData(selectEl) {
+    return Array.from(selectEl.options).map((option) => ({
+      value: option.value,
+      text: option.text.trim()
+    }));
+  }
 
-    // Respond immediately so the popup doesn't hang waiting
-    sendResponse({ success: true });
+  function getSelectedFromNativeSelect(selectEl) {
+    const selectedOption = selectEl.selectedOptions && selectEl.selectedOptions[0];
+    return {
+      value: selectEl.value || "",
+      text: selectedOption ? (selectedOption.text || "").trim() : ""
+    };
+  }
 
-    // Run automation independently in the background
-    automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText)
-      .then(() => {
-        chrome.storage.local.set({ wbdRunning: false, wbdStop: false, wbdPaused: false });
-      })
-      .catch(err => {
-        chrome.storage.local.set({ wbdRunning: false, wbdStop: false, wbdPaused: false });
-        if (err.__stopped) return; // voluntary stop — skip error notification
-        console.error('[WaterBillDownloader] Automation error:', err.message);
-        chrome.runtime.sendMessage({ action: 'automationError', error: err.message });
+  function getSelectedFromEnhancedUi(selectEl) {
+    if (!selectEl.id) {
+      return "";
+    }
+
+    const selector = `button[data-id="${safeCssEscape(selectEl.id)}"] .filter-option-inner-inner`;
+    const uiNode = document.querySelector(selector);
+    return uiNode ? uiNode.textContent.trim() : "";
+  }
+
+  function normalize(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function findSelectForLabel(labelText) {
+    const wanted = normalize(labelText);
+    const labels = Array.from(document.querySelectorAll("label"));
+
+    const matchingLabel = labels.find((label) => normalize(label.textContent).includes(wanted));
+    if (!matchingLabel) {
+      return null;
+    }
+
+    const forId = matchingLabel.getAttribute("for");
+    if (forId) {
+      const byFor = document.getElementById(forId);
+      if (byFor && byFor.tagName === "SELECT") {
+        return byFor;
+      }
+    }
+
+    const inContainer = matchingLabel.closest("div")?.querySelector("select");
+    if (inContainer) {
+      return inContainer;
+    }
+
+    const siblingSelect = matchingLabel.parentElement?.querySelector("select");
+    return siblingSelect || null;
+  }
+
+  function getTargetSelects() {
+    const matched = TARGET_LABELS.map((label) => findSelectForLabel(label));
+    if (matched.every(Boolean)) {
+      return matched;
+    }
+
+    // Fallback in case labels are changed in a future page update.
+    return Array.from(document.querySelectorAll("select")).slice(0, 3);
+  }
+
+  function hasUsefulOptions(selectEl) {
+    return Boolean(selectEl?.options && selectEl.options.length > 0);
+  }
+
+  function buildPayload(selects) {
+    return {
+      savedAt: new Date().toISOString(),
+      page: window.location.href,
+      dropdowns: selects.map((selectEl, index) => ({
+        ...(() => {
+          const nativeSelected = getSelectedFromNativeSelect(selectEl);
+          const uiSelectedText = getSelectedFromEnhancedUi(selectEl);
+          return {
+            selectedValue: nativeSelected.value,
+            selectedText: uiSelectedText || nativeSelected.text
+          };
+        })(),
+        index: index + 1,
+        label: TARGET_LABELS[index] || `Dropdown ${index + 1}`,
+        id: selectEl.id || null,
+        name: selectEl.name || null,
+        optionCount: selectEl.options ? selectEl.options.length : 0,
+        options: getOptionData(selectEl)
+      }))
+    };
+  }
+
+  function extractPayloadIfReady() {
+    const selects = getTargetSelects();
+    if (selects.length < 3 || !selects.every(hasUsefulOptions)) {
+      return null;
+    }
+
+    return buildPayload(selects);
+  }
+
+  function isMeaningfulPayload(payload) {
+    if (!payload || !Array.isArray(payload.dropdowns)) {
+      return false;
+    }
+
+    return payload.dropdowns.some((dropdown) => {
+      const selectedText = normalize(dropdown.selectedText);
+      const hasSelected = selectedText && !selectedText.startsWith("select ");
+
+      const hasNonPlaceholderOption = (dropdown.options || []).some((opt) => {
+        const text = normalize(opt.text);
+        const value = normalize(opt.value);
+        return Boolean(value) || (text && !text.startsWith("select "));
       });
 
-    return false;
+      return hasSelected || hasNonPlaceholderOption;
+    });
   }
-});
 
-} // end of window.__waterBillExtensionLoaded guard
+  function savePayload({ overwrite }, onDone) {
+    chrome.storage.local.get([STORAGE_KEY], (result) => {
+      const existing = result[STORAGE_KEY];
+      if (existing && !overwrite) {
+        console.log("[Water Bill Dropdown Saver] Already saved. Skipping.");
+        if (onDone) {
+          onDone({ ok: true, alreadySaved: true, payload: existing });
+        }
+        return;
+      }
+
+      const payload = extractPayloadIfReady();
+      if (!payload) {
+        if (onDone) {
+          onDone({
+            ok: false,
+            reason: "Could not find all three dropdowns with loaded options yet."
+          });
+        }
+        return;
+      }
+
+      if (!isMeaningfulPayload(payload)) {
+        if (onDone) {
+          onDone({
+            ok: false,
+            reason: "Dropdown data is still placeholder-only. Select values first, then Save Now."
+          });
+        }
+        return;
+      }
+
+      chrome.storage.local.set({ [STORAGE_KEY]: payload }, () => {
+        console.log("[Water Bill Dropdown Saver] Dropdown data saved.", payload);
+        if (onDone) {
+          onDone({ ok: true, alreadySaved: false, overwritten: Boolean(existing && overwrite), payload });
+        }
+      });
+    });
+  }
+
+  function trySaveFirstTime(onDone) {
+    savePayload({ overwrite: false }, onDone);
+  }
+
+  function forceSaveNow(sendResponse) {
+    savePayload({ overwrite: true }, (result) => {
+      if (sendResponse) {
+        sendResponse(result);
+      }
+    });
+  }
+
+  function findListBillButton() {
+    const clickable = Array.from(document.querySelectorAll("button, input[type='button'], input[type='submit'], a"));
+    return clickable.find((el) => {
+      const label = normalize(el.textContent || el.value || "");
+      return label === "list bill" || label.includes("list bill");
+    }) || null;
+  }
+
+  function clickListBillOnce() {
+    const button = findListBillButton();
+    if (!button) {
+      return { ok: false, reason: "List Bill button not found on page." };
+    }
+
+    button.click();
+    return { ok: true };
+  }
+
+  function findExportButton() {
+    function isVisible(el) {
+      if (!el) {
+        return false;
+      }
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+        return false;
+      }
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+
+    const selectors = [
+      ".tbl-handles button[mattooltip*='Export Bills' i]",
+      ".tbl-handles button[title*='Export Bills' i]",
+      ".tbl-handles button[aria-label*='Export Bills' i]",
+      ".tbl-handles button .fa-download",
+      "button[mattooltip*='Export Bills' i]",
+      "button[title*='Export Bills' i]",
+      "button[aria-label*='Export Bills' i]",
+      "button .fa-download"
+    ];
+
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {
+        const button = node.tagName === "BUTTON" ? node : node.closest("button");
+        if (button && isVisible(button)) {
+          return button;
+        }
+      }
+    }
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    return buttons.find((button) => {
+      const label = normalize(button.textContent || "");
+      return isVisible(button) && label.includes("export") && label.includes("bill");
+    }) || null;
+  }
+
+  function clickExportOnce() {
+    const button = findExportButton();
+    if (!button) {
+      return { ok: false, reason: "Export Bills button not found on page." };
+    }
+
+    const isDisabled =
+      button.disabled ||
+      button.getAttribute("aria-disabled") === "true" ||
+      normalize(button.className).includes("disabled");
+    if (isDisabled) {
+      return { ok: false, reason: "Export Bills button is disabled (table may still be loading)." };
+    }
+
+    button.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+    button.focus();
+
+    const rect = button.getBoundingClientRect();
+    const clickX = Math.max(1, Math.round(rect.left + rect.width / 2));
+    const clickY = Math.max(1, Math.round(rect.top + rect.height / 2));
+
+    chrome.runtime.sendMessage({ type: "REAL_CLICK_EXPORT", x: clickX, y: clickY }, () => {
+      // Best-effort trusted click. Synthetic fallback below still executes.
+    });
+
+    try {
+      button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+      button.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, composed: true }));
+    } catch (_err) {
+      // PointerEvent may be unavailable in older contexts; fallback below still runs.
+    }
+
+    button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true, view: window }));
+    button.click();
+    return { ok: true };
+  }
+
+  function getBillingDownloadCounter(callback) {
+    chrome.runtime.sendMessage({ type: "GET_BILLING_DOWNLOAD_COUNTER" }, (response) => {
+      if (chrome.runtime.lastError || !response || !response.ok) {
+        callback({ ok: false, counter: 0 });
+        return;
+      }
+
+      callback({ ok: true, counter: Number(response.counter) || 0 });
+    });
+  }
+
+  function stopListBillRun() {
+    if (LIST_BILL_STATE.timerId) {
+      clearTimeout(LIST_BILL_STATE.timerId);
+    }
+
+    LIST_BILL_STATE.isRunning = false;
+    LIST_BILL_STATE.timerId = null;
+    LIST_BILL_STATE.runId = null;
+    LIST_BILL_STATE.nextClickAt = null;
+    LIST_BILL_STATE.phase = "idle";
+  }
+
+  function getListBillStatus() {
+    const now = Date.now();
+    const runSeconds = LIST_BILL_STATE.startedAt ? Math.floor((now - LIST_BILL_STATE.startedAt) / 1000) : 0;
+    const listSecondsSinceLast = LIST_BILL_STATE.lastListClickAt
+      ? Math.floor((now - LIST_BILL_STATE.lastListClickAt) / 1000)
+      : -1;
+    const exportSecondsSinceLast = LIST_BILL_STATE.lastExportClickAt
+      ? Math.floor((now - LIST_BILL_STATE.lastExportClickAt) / 1000)
+      : -1;
+
+    return {
+      ok: true,
+      isRunning: LIST_BILL_STATE.isRunning,
+      listClickCount: LIST_BILL_STATE.listClickCount,
+      exportClickCount: LIST_BILL_STATE.exportClickCount,
+      runSeconds,
+      listSecondsSinceLast,
+      exportSecondsSinceLast,
+      intervalMs: LIST_BILL_STATE.intervalMs,
+      nextClickAt: LIST_BILL_STATE.nextClickAt,
+      phase: LIST_BILL_STATE.phase,
+      exportWaitMs: EXPORT_WAIT_MS,
+      lastError: LIST_BILL_STATE.lastError
+    };
+  }
+
+  function runListBillRepeatedly(message, sendResponse) {
+    const intervalMs = Math.max(1, Math.min(24 * 60 * 60 * 1000, Number(message.intervalMs) || 1500));
+
+    if (LIST_BILL_STATE.isRunning) {
+      sendResponse({ ok: false, reason: "List Bill run already in progress. Click Stop first." });
+      return;
+    }
+
+    const runId = Date.now();
+    LIST_BILL_STATE.isRunning = true;
+    LIST_BILL_STATE.runId = runId;
+    LIST_BILL_STATE.startedAt = Date.now();
+    LIST_BILL_STATE.listClickCount = 0;
+    LIST_BILL_STATE.exportClickCount = 0;
+    LIST_BILL_STATE.lastListClickAt = null;
+    LIST_BILL_STATE.lastExportClickAt = null;
+    LIST_BILL_STATE.intervalMs = intervalMs;
+    LIST_BILL_STATE.nextClickAt = null;
+    LIST_BILL_STATE.phase = "starting";
+    LIST_BILL_STATE.lastError = null;
+
+    const scheduleNextCycle = () => {
+      LIST_BILL_STATE.phase = "waiting-next-cycle";
+      LIST_BILL_STATE.nextClickAt = Date.now() + intervalMs;
+      LIST_BILL_STATE.timerId = setTimeout(step, intervalMs);
+    };
+
+    const scheduleExportStep = () => {
+      LIST_BILL_STATE.phase = "waiting-export";
+      LIST_BILL_STATE.nextClickAt = Date.now() + EXPORT_WAIT_MS;
+      LIST_BILL_STATE.timerId = setTimeout(() => {
+        if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+          return;
+        }
+
+        let exportAttempt = 0;
+        const tryExport = () => {
+          if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+            return;
+          }
+
+          LIST_BILL_STATE.phase = "clicking-export";
+          LIST_BILL_STATE.nextClickAt = null;
+
+          getBillingDownloadCounter((before) => {
+            if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+              return;
+            }
+
+            const exportResult = clickExportOnce();
+            if (!exportResult.ok) {
+              exportAttempt += 1;
+              if (exportAttempt >= EXPORT_MAX_RETRIES) {
+                LIST_BILL_STATE.lastError = `${exportResult.reason} (retried ${EXPORT_MAX_RETRIES} times)`;
+                stopListBillRun();
+                return;
+              }
+
+              LIST_BILL_STATE.phase = "waiting-export";
+              LIST_BILL_STATE.nextClickAt = Date.now() + EXPORT_RETRY_MS;
+              LIST_BILL_STATE.timerId = setTimeout(tryExport, EXPORT_RETRY_MS);
+              return;
+            }
+
+            LIST_BILL_STATE.phase = "confirming-download";
+            LIST_BILL_STATE.nextClickAt = Date.now() + EXPORT_DOWNLOAD_CONFIRM_MS;
+            LIST_BILL_STATE.timerId = setTimeout(() => {
+              if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+                return;
+              }
+
+              getBillingDownloadCounter((after) => {
+                if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+                  return;
+                }
+
+                const beforeCount = before.ok ? before.counter : 0;
+                const afterCount = after.ok ? after.counter : 0;
+                if (afterCount > beforeCount) {
+                  LIST_BILL_STATE.exportClickCount += 1;
+                  LIST_BILL_STATE.lastExportClickAt = Date.now();
+                  scheduleNextCycle();
+                  return;
+                }
+
+                exportAttempt += 1;
+                if (exportAttempt >= EXPORT_MAX_RETRIES) {
+                  LIST_BILL_STATE.lastError = "Export click did not start any download.";
+                  stopListBillRun();
+                  return;
+                }
+
+                LIST_BILL_STATE.phase = "waiting-export";
+                LIST_BILL_STATE.nextClickAt = Date.now() + EXPORT_RETRY_MS;
+                LIST_BILL_STATE.timerId = setTimeout(tryExport, EXPORT_RETRY_MS);
+              });
+            }, EXPORT_DOWNLOAD_CONFIRM_MS);
+          });
+        };
+
+        tryExport();
+      }, EXPORT_WAIT_MS);
+    };
+
+    const step = () => {
+      if (!LIST_BILL_STATE.isRunning || LIST_BILL_STATE.runId !== runId) {
+        return;
+      }
+
+      LIST_BILL_STATE.phase = "clicking-list-bill";
+      LIST_BILL_STATE.nextClickAt = null;
+
+      const clickResult = clickListBillOnce();
+      if (!clickResult.ok) {
+        LIST_BILL_STATE.lastError = clickResult.reason;
+        stopListBillRun();
+        return;
+      }
+
+      LIST_BILL_STATE.listClickCount += 1;
+      LIST_BILL_STATE.lastListClickAt = Date.now();
+      scheduleExportStep();
+    };
+
+    LIST_BILL_STATE.phase = "starting";
+    LIST_BILL_STATE.nextClickAt = Date.now();
+    step();
+    sendResponse({
+      ok: true,
+      started: true,
+      intervalMs,
+      listClickedInitial: LIST_BILL_STATE.listClickCount,
+      exportWaitMs: EXPORT_WAIT_MS
+    });
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    try {
+      if (!message || !message.type) {
+        return false;
+      }
+
+      if (message.type === "EXTRACT_AND_SAVE") {
+        if (message.force) {
+          forceSaveNow(sendResponse);
+        } else {
+          trySaveFirstTime(sendResponse);
+        }
+        return true;
+      }
+
+      if (message.type === "RUN_LIST_BILL") {
+        runListBillRepeatedly(message, sendResponse);
+        return true;
+      }
+
+      if (message.type === "STOP_LIST_BILL") {
+        const wasRunning = LIST_BILL_STATE.isRunning;
+        const listClickCount = LIST_BILL_STATE.listClickCount;
+        const exportClickCount = LIST_BILL_STATE.exportClickCount;
+        stopListBillRun();
+        sendResponse({ ok: true, stopped: true, wasRunning, listClickCount, exportClickCount });
+        return false;
+      }
+
+      if (message.type === "GET_LIST_BILL_STATUS") {
+        sendResponse(getListBillStatus());
+        return false;
+      }
+
+      return false;
+    } catch (error) {
+      sendResponse({
+        ok: false,
+        reason: `Unexpected error: ${error && error.message ? error.message : String(error)}`
+      });
+      return false;
+    }
+  });
+
+  // Some dropdowns are populated after page load, so retry briefly.
+  function runWithRetry(maxRetries = 20, intervalMs = 500) {
+    let retries = 0;
+    const timer = setInterval(() => {
+      retries += 1;
+
+      chrome.storage.local.get([STORAGE_KEY], (result) => {
+        if (result[STORAGE_KEY]) {
+          clearInterval(timer);
+          return;
+        }
+
+        const ready = Boolean(extractPayloadIfReady());
+
+        if (ready) {
+          clearInterval(timer);
+          trySaveFirstTime();
+          return;
+        }
+
+        if (retries >= maxRetries) {
+          clearInterval(timer);
+          console.warn("[Water Bill Dropdown Saver] Dropdowns were not ready in time.");
+        }
+      });
+    }, intervalMs);
+  }
+
+  runWithRetry();
+})();
