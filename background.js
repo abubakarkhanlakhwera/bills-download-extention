@@ -76,25 +76,34 @@ chrome.runtime.onMessage.addListener((message) => {
    to our standard path and mark their ID for later cleanup.
 ════════════════════════════════════════ */
 chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-  chrome.storage.session.get(['pendingWaterBillDownload'], data => {
-    if (!data.pendingWaterBillDownload) {
-      // Not our download – leave Chrome's default alone
-      suggest();
+  // PRIMARY: check if this download was initiated from the portal tab.
+  // This is reliable regardless of service-worker sleep timing.
+  chrome.tabs.query({ url: '*://elgcd.punjab.gov.pk/*' }, tabs => {
+    const isFromPortal = tabs.some(t => t.id === downloadItem.tabId);
+
+    if (isFromPortal) {
+      // Definitely our water-bill export — rename it.
+      const newFilename = buildFilename(downloadItem.filename);
+      chrome.storage.session.set({ currentWaterBillDownloadId: downloadItem.id });
+      chrome.storage.session.remove('pendingWaterBillDownload'); // clean up flag
+      suggest({ filename: newFilename, conflictAction: 'uniquify' });
       return;
     }
 
-    // Clear the flag immediately to avoid accidentally catching a second download
-    chrome.storage.session.remove('pendingWaterBillDownload');
-
-    const newFilename = buildFilename(downloadItem.filename);
-
-    // Remember this download ID so we can track completion and delete it next time
-    chrome.storage.session.set({ currentWaterBillDownloadId: downloadItem.id });
-
-    suggest({ filename: newFilename, conflictAction: 'uniquify' });
+    // FALLBACK: check the pending flag (handles edge cases where tabId is 0/-1)
+    chrome.storage.session.get(['pendingWaterBillDownload'], data => {
+      if (!data.pendingWaterBillDownload) {
+        suggest(); // not our download
+        return;
+      }
+      chrome.storage.session.remove('pendingWaterBillDownload');
+      const newFilename = buildFilename(downloadItem.filename);
+      chrome.storage.session.set({ currentWaterBillDownloadId: downloadItem.id });
+      suggest({ filename: newFilename, conflictAction: 'uniquify' });
+    });
   });
 
-  return true; // Signal that suggest() will be called asynchronously
+  return true; // async suggest()
 });
 
 /* ════════════════════════════════════════
@@ -105,8 +114,9 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
      • Show a success notification
 ════════════════════════════════════════ */
 chrome.downloads.onChanged.addListener(delta => {
-  // Only care about state changes to 'complete' or 'interrupted'
+  // Only handle terminal state transitions (complete / interrupted)
   if (!delta.state) return;
+  if (delta.state.current !== 'complete' && delta.state.current !== 'interrupted') return;
 
   chrome.storage.session.get(['currentWaterBillDownloadId'], sessionData => {
     if (delta.id !== sessionData.currentWaterBillDownloadId) return;
@@ -150,5 +160,73 @@ chrome.downloads.onChanged.addListener(delta => {
 
     // Always clear the in-session tracking ID once we've handled this download
     chrome.storage.session.remove('currentWaterBillDownloadId');
+  });
+});
+
+/* ════════════════════════════════════════
+   Extension icon click → open popup as a
+   persistent window (won't auto-close on blur)
+════════════════════════════════════════ */
+chrome.action.onClicked.addListener(() => {
+  chrome.windows.create({
+    url:     chrome.runtime.getURL('popup.html'),
+    type:    'popup',
+    width:   420,
+    height:  720,
+    focused: true,
+  });
+});
+
+/* ════════════════════════════════════════
+   Scheduled auto-download (chrome.alarms)
+════════════════════════════════════════ */
+const PORTAL_URL = 'https://elgcd.punjab.gov.pk/e-billing/water-bill-list';
+
+chrome.alarms.onAlarm.addListener(async alarm => {
+  if (alarm.name !== 'waterBillSchedule') return;
+
+  // Load saved selections
+  const stored = await chrome.storage.local.get('waterBillSettings');
+  const s = stored.waterBillSettings;
+  if (!s || !s.financialYear || !s.billingPeriod || !s.billingDuration) {
+    notify(
+      'Water Bill Scheduler',
+      'No saved settings found. Open the extension, select options, and click Save Settings first.'
+    );
+    return;
+  }
+
+  // Find an existing portal tab; otherwise open a new one
+  const tabs = await chrome.tabs.query({ url: '*://elgcd.punjab.gov.pk/*' });
+  let tab = tabs[0];
+  if (!tab) {
+    tab = await chrome.tabs.create({ url: PORTAL_URL, active: false });
+    // Wait for the page to fully load
+    await new Promise(resolve => {
+      chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+        if (tabId === tab.id && info.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      });
+    });
+    // Extra wait for Angular to render
+    await new Promise(r => setTimeout(r, 3000));
+  }
+
+  // Inject content.js (guard inside prevents double-registration)
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+  } catch (_) { /* already injected */ }
+
+  // Trigger automation with saved settings
+  chrome.tabs.sendMessage(tab.id, {
+    action: 'startDownload',
+    data: {
+      financialYear:       s.financialYear,
+      billingPeriod:       s.billingPeriod,
+      billingDuration:     s.billingDuration,
+      billingDurationText: s.billingDurationText || '',
+    },
   });
 });

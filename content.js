@@ -204,6 +204,9 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
   const listBtn = findButtonByText('list bill');
   if (!listBtn) throw new Error('"List Bill" button not found on this page.');
   listBtn.click();
+  // Mandatory pause: let the portal clear the old table before we start polling.
+  // Without this, the old loaded table satisfies rows>1 immediately.
+  await delay(2000);
 
   /* ── Step 5: Wait for the results table (up to 15 s) ── */
   let tableFound = false;

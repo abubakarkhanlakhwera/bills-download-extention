@@ -76,12 +76,21 @@ function loadSaved() {
    Get active tab (not a chrome:// page)
 ──────────────────────────────────────── */
 async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) throw new Error('No active tab found.');
-  if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://'))) {
-    throw new Error('Cannot access browser internal pages.');
+  const isInternal = url =>
+    !url || url.startsWith('chrome://') || url.startsWith('chrome-extension://') ||
+    url.startsWith('about:') || url.startsWith('edge://');
+
+  // 1. Prefer the portal tab if it's already open (any window)
+  const portalTabs = await chrome.tabs.query({ url: '*://elgcd.punjab.gov.pk/*' });
+  if (portalTabs.length > 0) return portalTabs[0];
+
+  // 2. Check the active tab in every window (popup is its own window now)
+  const allActive = await chrome.tabs.query({ active: true });
+  for (const tab of allActive) {
+    if (!isInternal(tab.url)) return tab;
   }
-  return tab;
+
+  throw new Error('Open the Water Bill portal tab first, then retry.');
 }
 
 /* ────────────────────────────────────────
@@ -402,7 +411,95 @@ document.getElementById('downloadBtn').addEventListener('click', async () => {
 document.getElementById('refreshBtn').addEventListener('click', () => loadOptions(true));
 
 /* ────────────────────────────────────────
+   Save button handler
+──────────────────────────────────────── */
+document.getElementById('saveBtn').addEventListener('click', () => {
+  saveSelections();
+  const btn = document.getElementById('saveBtn');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '&#10003; Saved!';
+  btn.classList.add('saved');
+  setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('saved'); }, 1500);
+});
+
+/* ────────────────────────────────────────
+   Scheduler
+──────────────────────────────────────── */
+const ALARM_NAME   = 'waterBillSchedule';
+const SCHEDULE_KEY = 'waterBillSchedule';
+
+function getIntervalMinutes(interval, unit) {
+  const n = Math.max(1, parseInt(interval, 10) || 1);
+  if (unit === 'hours') return n * 60;
+  if (unit === 'days')  return n * 60 * 24;
+  return n; // minutes
+}
+
+async function updateNextRunDisplay() {
+  const alarm = await chrome.alarms.get(ALARM_NAME);
+  const el    = document.getElementById('schedulerNext');
+  if (alarm) {
+    el.textContent = 'Next run: ' + new Date(alarm.scheduledTime).toLocaleString();
+  } else {
+    el.textContent = '';
+  }
+}
+
+async function loadSchedulerSettings() {
+  const data = await new Promise(r => chrome.storage.local.get(SCHEDULE_KEY, r));
+  const s = data[SCHEDULE_KEY] || { enabled: false, interval: 24, unit: 'hours' };
+  document.getElementById('scheduleEnabled').checked = s.enabled;
+  document.getElementById('scheduleInterval').value  = s.interval;
+  document.getElementById('scheduleUnit').value      = s.unit;
+  if (s.enabled) {
+    document.getElementById('schedulerBody').classList.add('visible');
+    await updateNextRunDisplay();
+  }
+}
+
+async function persistSchedulerSettings() {
+  const s = {
+    enabled:  document.getElementById('scheduleEnabled').checked,
+    interval: parseInt(document.getElementById('scheduleInterval').value, 10) || 24,
+    unit:     document.getElementById('scheduleUnit').value,
+  };
+  await new Promise(r => chrome.storage.local.set({ [SCHEDULE_KEY]: s }, r));
+  return s;
+}
+
+async function applySchedule(interval, unit) {
+  const mins = getIntervalMinutes(interval, unit);
+  await chrome.alarms.clear(ALARM_NAME);
+  chrome.alarms.create(ALARM_NAME, { delayInMinutes: mins, periodInMinutes: mins });
+  await updateNextRunDisplay();
+}
+
+document.getElementById('scheduleEnabled').addEventListener('change', async () => {
+  const s = await persistSchedulerSettings();
+  document.getElementById('schedulerBody').classList.toggle('visible', s.enabled);
+  if (s.enabled) {
+    await applySchedule(s.interval, s.unit);
+    const alarm = await chrome.alarms.get(ALARM_NAME);
+    const next  = alarm ? new Date(alarm.scheduledTime).toLocaleString() : '–';
+    showStatus('Schedule enabled! Next run: ' + next, 'success');
+  } else {
+    await chrome.alarms.clear(ALARM_NAME);
+    document.getElementById('schedulerNext').textContent = '';
+    showStatus('Schedule disabled.', 'info');
+  }
+  setTimeout(clearStatus, 4000);
+});
+
+['scheduleInterval', 'scheduleUnit'].forEach(id => {
+  document.getElementById(id).addEventListener('change', async () => {
+    const s = await persistSchedulerSettings();
+    if (s.enabled) await applySchedule(s.interval, s.unit);
+  });
+});
+
+/* ────────────────────────────────────────
    Init
 ──────────────────────────────────────── */
 bindChangeListeners();
 loadOptions(true);
+loadSchedulerSettings();

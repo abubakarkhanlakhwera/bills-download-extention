@@ -9,7 +9,8 @@
     "activeTab",
     "scripting",
     "tabs",
-    "notifications"
+    "notifications",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -18,7 +19,6 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
     "default_title": "Water Bill Downloader",
     "default_icon": {
       "16": "icons/icon16.png",

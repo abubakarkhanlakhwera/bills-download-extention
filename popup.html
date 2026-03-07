@@ -100,6 +100,79 @@
     }
     .btn-download:hover:not(:disabled) { background: #2d1f4a; }
 
+    .btn-save {
+      width: 100%;
+      margin-top: 6px;
+      background: #e8e4f2;
+      color: #3d2b5e;
+      font-size: 12px;
+      padding: 7px 10px;
+    }
+    .btn-save:hover:not(:disabled) { background: #d5cde8; }
+    .btn-save.saved { background: #e6f4ea !important; color: #1e7e34 !important; }
+
+    /* ── Scheduler ── */
+    .scheduler-section { margin-top: 2px; }
+    .scheduler-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .scheduler-toggle input[type="checkbox"] {
+      width: 15px; height: 15px;
+      cursor: pointer;
+      accent-color: #3d2b5e;
+    }
+    .scheduler-toggle-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #4a4a6a;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .scheduler-body {
+      display: none;
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: #f0ebfa;
+      border-radius: 6px;
+      border-left: 3px solid #3d2b5e;
+    }
+    .scheduler-body.visible { display: block; }
+    .scheduler-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sched-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: #555;
+      flex: 0 0 auto;
+    }
+    #scheduleInterval {
+      width: 58px;
+      padding: 5px 7px;
+      border: 1.5px solid #d1d5e0;
+      border-radius: 5px;
+      font-size: 13px;
+      text-align: center;
+    }
+    #scheduleUnit {
+      flex: 1;
+      padding: 5px 8px;
+      font-size: 13px;
+    }
+    .scheduler-next {
+      margin-top: 7px;
+      font-size: 11px;
+      color: #555;
+      font-style: italic;
+    }
+
     /* ── Status bar ── */
     .status {
       margin-top: 11px;
@@ -138,21 +211,21 @@
 
     <div class="field">
       <label>Financial Year <span class="req">*</span></label>
-      <select id="financialYear">
+      <select id="financialYear" title="Financial Year">
         <option value="">— Select Financial Year —</option>
       </select>
     </div>
 
     <div class="field">
       <label>Billing Period <span class="req">*</span></label>
-      <select id="billingPeriod">
+      <select id="billingPeriod" title="Billing Period">
         <option value="">— Select Billing Period —</option>
       </select>
     </div>
 
     <div class="field">
       <label>Billing Duration <span class="req">*</span></label>
-      <select id="billingDuration">
+      <select id="billingDuration" title="Billing Duration">
         <option value="">— Select Billing Duration —</option>
       </select>
     </div>
@@ -161,15 +234,39 @@
 
     <div class="btn-row">
       <button class="btn btn-refresh" id="refreshBtn" title="Reload options from page">&#8635;</button>
-      <button class="btn btn-download" id="downloadBtn">⬇&nbsp; Download Water Bill</button>
+      <button class="btn btn-download" id="downloadBtn">&#11015;&nbsp; Download Water Bill</button>
     </div>
 
+    <button class="btn btn-save" id="saveBtn">&#128190;&nbsp; Save Settings</button>
+
     <div class="status" id="status"></div>
+
+    <hr class="divider" />
+
+    <div class="scheduler-section">
+      <label class="scheduler-toggle">
+        <input type="checkbox" id="scheduleEnabled" />
+        <span class="scheduler-toggle-label">&#9200; Auto-Schedule Download</span>
+      </label>
+      <div class="scheduler-body" id="schedulerBody">
+        <div class="scheduler-row">
+          <span class="sched-label">Every</span>
+          <input type="number" id="scheduleInterval" min="1" max="999" value="24" />
+          <select id="scheduleUnit">
+            <option value="minutes">Minutes</option>
+            <option value="hours" selected>Hours</option>
+            <option value="days">Days</option>
+          </select>
+        </div>
+        <div class="scheduler-next" id="schedulerNext"></div>
+      </div>
+    </div>
 
   </div>
 
   <div class="footer">
-      Billing Duration loads automatically after selecting Year &amp; Period.
+    Billing Duration loads automatically after selecting Year &amp; Period.
+  </div>
 
   <script src="popup.js"></script>
 </body>
