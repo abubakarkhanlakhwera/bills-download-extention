@@ -122,6 +122,27 @@ function waitFor(condition, timeout = 8000, interval = 250) {
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
 /* ════════════════════════════════════════
+   Stop / Pause control
+   Checks shared session flags at each automation checkpoint.
+   Throws a special error (.__stopped = true) on Stop so the
+   call-site can silence the error notification.
+════════════════════════════════════════ */
+async function checkControl() {
+  for (;;) {
+    const data = await new Promise(r =>
+      chrome.storage.local.get(['wbdStop', 'wbdPaused'], r)
+    );
+    if (data.wbdStop) {
+      const e = new Error('__STOPPED__');
+      e.__stopped = true;
+      throw e;
+    }
+    if (!data.wbdPaused) break;
+    await delay(400);
+  }
+}
+
+/* ════════════════════════════════════════
    Read options from a <select>
 ════════════════════════════════════════ */
 function readOptions(select) {
@@ -137,15 +158,19 @@ function readOptions(select) {
    Automation
 ════════════════════════════════════════ */
 async function automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText) {
+  // Broadcast that automation is running so the popup can show Stop/Pause buttons
+  chrome.storage.local.set({ wbdRunning: true, wbdStop: false, wbdPaused: false });
 
   /* ── Step 1: Financial Year ── */
+  await checkControl();
   const fySelect = findSelectByKeyword('financial year');
   if (!fySelect) throw new Error('Financial Year dropdown not found on this page.');
   setSelectValue(fySelect, financialYear);
   // Wait 1 s — Angular clears BP/BD after FY change
   await delay(1000);
+  await checkControl();
 
-  /* ── Step 2: Billing Period ── */
+  /* ── Step 2: Billing Period ── 
   const bpSelect = findSelectByKeyword('billing period');
   if (!bpSelect) throw new Error('Billing Period dropdown not found on this page.');
   await waitFor(() => bpSelect.options.length > 1, 5000).catch(() => {});
@@ -199,6 +224,7 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
   bdSelect.dispatchEvent(new Event('input',  { bubbles: true }));
   bdSelect.dispatchEvent(new Event('change', { bubbles: true }));
   await delay(500);
+  await checkControl();
 
   /* ── Step 4: Click "List Bill" ── */
   const listBtn = findButtonByText('list bill');
@@ -207,6 +233,7 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
   // Mandatory pause: let the portal clear the old table before we start polling.
   // Without this, the old loaded table satisfies rows>1 immediately.
   await delay(2000);
+  await checkControl();
 
   /* ── Step 5: Wait for the results table (up to 15 s) ── */
   let tableFound = false;
@@ -223,9 +250,56 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
   }
 
   if (tableFound) await delay(1000);
+  await checkControl();
 
   /* ── Step 6: Tag next download ── */
   chrome.runtime.sendMessage({ action: 'prepareDownload' });
+
+  /* ── Step 6b: Intercept programmatic blob-URL downloads ──
+     Angular typically does:
+       const url = URL.createObjectURL(blob);
+       const a = document.createElement('a');
+       a.href = url; a.download = 'file.xlsx'; a.click();
+     We override HTMLAnchorElement.prototype.click to catch this,
+     read the blob as a data-URL (accessible in-page), and send it
+     to the background where chrome.downloads.download() handles it.
+  ── */
+  let _blobIntercepted = false;
+  const _origAnchorClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function _interceptDownload() {
+    if (
+      !_blobIntercepted &&
+      this.href &&
+      this.href.startsWith('blob:') &&
+      this.hasAttribute('download')
+    ) {
+      _blobIntercepted = true;
+      HTMLAnchorElement.prototype.click = _origAnchorClick; // restore immediately
+      const blobUrl       = this.href;
+      const origFilename  = this.getAttribute('download') || 'water_bill.xlsx';
+      fetch(blobUrl)
+        .then(r => r.blob())
+        .then(blob => new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload  = () => res(reader.result);
+          reader.onerror = rej;
+          reader.readAsDataURL(blob);
+        }))
+        .then(dataUrl => {
+          chrome.runtime.sendMessage({
+            action: 'downloadDataUrl',
+            dataUrl,
+            originalFilename: origFilename,
+          });
+        })
+        .catch(() => {
+          // Fallback: let the original click proceed (onDeterminingFilename covers it)
+          _origAnchorClick.call(this);
+        });
+      return;
+    }
+    return _origAnchorClick.call(this);
+  };
 
   /* ── Step 7: Click "Export Bills" ── */
   let exportBtn = null;
@@ -243,6 +317,14 @@ async function automateDownload(financialYear, billingPeriod, billingDuration, b
   }
 
   exportBtn.click();
+
+  // Safety cleanup: restore click prototype if blob was never seen
+  // (e.g. the portal uses a direct URL download instead of a blob)
+  setTimeout(() => {
+    if (!_blobIntercepted) {
+      HTMLAnchorElement.prototype.click = _origAnchorClick;
+    }
+  }, 15000);
 }
 
 /* ════════════════════════════════════════
@@ -281,7 +363,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     // Run automation independently in the background
     automateDownload(financialYear, billingPeriod, billingDuration, billingDurationText)
+      .then(() => {
+        chrome.storage.local.set({ wbdRunning: false, wbdStop: false, wbdPaused: false });
+      })
       .catch(err => {
+        chrome.storage.local.set({ wbdRunning: false, wbdStop: false, wbdPaused: false });
+        if (err.__stopped) return; // voluntary stop — skip error notification
         console.error('[WaterBillDownloader] Automation error:', err.message);
         chrome.runtime.sendMessage({ action: 'automationError', error: err.message });
       });

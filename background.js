@@ -56,9 +56,39 @@ function notify(title, message) {
 }
 
 /* ════════════════════════════════════════
+   Download log – keep last 5 entries
+════════════════════════════════════════ */
+const LOG_KEY = 'waterBillDownloadLog';
+
+function addDownloadLog(filename, timestamp) {
+  chrome.storage.local.get(LOG_KEY, data => {
+    const log = data[LOG_KEY] || [];
+    log.unshift({ filename, timestamp });
+    chrome.storage.local.set({ [LOG_KEY]: log.slice(0, 5) });
+  });
+}
+
+/* ════════════════════════════════════════
+   Time-range helper for the scheduler
+════════════════════════════════════════ */
+function isInTimeRange(startTime, endTime) {
+  if (!startTime || !endTime) return true;
+  const now = new Date();
+  const cur   = now.getHours() * 60 + now.getMinutes();
+  const [sh, sm] = startTime.split(':').map(Number);
+  const [eh, em] = endTime.split(':').map(Number);
+  const start = sh * 60 + sm;
+  const end   = eh * 60 + em;
+  // Overnight range (e.g. 22:00 – 06:00)
+  if (start > end) return cur >= start || cur <= end;
+  return cur >= start && cur <= end;
+}
+
+/* ════════════════════════════════════════
    Message listener
-   – 'prepareDownload'  : set the pending flag so the next download is captured
-   – 'automationError'  : surface content-script errors to the user
+   – 'prepareDownload'   : set the pending flag so the next download is captured
+   – 'automationError'   : surface content-script errors to the user
+   – 'downloadDataUrl'   : explicit download from a blob intercepted in content.js
 ════════════════════════════════════════ */
 chrome.runtime.onMessage.addListener((message) => {
   if (message.action === 'prepareDownload') {
@@ -67,6 +97,25 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message.action === 'automationError') {
     notify('Water Bill – Automation Error', message.error || 'An unknown error occurred.');
+  }
+
+  // Explicit download initiated by the blob-URL interceptor in content.js.
+  // data-URLs are accessible from the service worker, unlike blob: URLs.
+  if (message.action === 'downloadDataUrl') {
+    // Clear the pending flag – we are handling this download ourselves.
+    chrome.storage.session.remove('pendingWaterBillDownload');
+    const filename = buildFilename(message.originalFilename || 'water_bill.xlsx');
+    chrome.downloads.download(
+      { url: message.dataUrl, filename, conflictAction: 'uniquify', saveAs: false },
+      downloadId => {
+        if (chrome.runtime.lastError) {
+          notify('Water Bill Download Error', chrome.runtime.lastError.message);
+          return;
+        }
+        // Tag this download so onChanged can log + clean up the previous one
+        chrome.storage.session.set({ currentWaterBillDownloadId: downloadId });
+      }
+    );
   }
 });
 
@@ -122,6 +171,15 @@ chrome.downloads.onChanged.addListener(delta => {
     if (delta.id !== sessionData.currentWaterBillDownloadId) return;
 
     if (delta.state.current === 'complete') {
+      // Record this download in the log
+      chrome.downloads.search({ id: delta.id }, items => {
+        if (items && items[0]) {
+          const rawPath = items[0].filename || '';
+          const fn = rawPath.replace(/\\/g, '/').split('/').pop() || rawPath || 'unknown';
+          addDownloadLog(fn, new Date().toISOString());
+        }
+      });
+
       // Retrieve the ID of the previously-downloaded water bill
       chrome.storage.local.get(['lastWaterBillDownloadId'], localData => {
         const prevId = localData.lastWaterBillDownloadId;
@@ -172,7 +230,7 @@ chrome.action.onClicked.addListener(() => {
     url:     chrome.runtime.getURL('popup.html'),
     type:    'popup',
     width:   420,
-    height:  720,
+    height:  820,
     focused: true,
   });
 });
@@ -185,15 +243,25 @@ const PORTAL_URL = 'https://elgcd.punjab.gov.pk/e-billing/water-bill-list';
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== 'waterBillSchedule') return;
 
-  // Load saved selections
-  const stored = await chrome.storage.local.get('waterBillSettings');
-  const s = stored.waterBillSettings;
+  // Load saved selections and schedule settings
+  const stored = await chrome.storage.local.get(['waterBillSettings', 'waterBillSchedule']);
+  const s     = stored.waterBillSettings;
+  const sched = stored.waterBillSchedule || {};
+
   if (!s || !s.financialYear || !s.billingPeriod || !s.billingDuration) {
     notify(
       'Water Bill Scheduler',
       'No saved settings found. Open the extension, select options, and click Save Settings first.'
     );
     return;
+  }
+
+  // Honour the time-range window if one is configured
+  if (sched.startTime && sched.endTime) {
+    if (!isInTimeRange(sched.startTime, sched.endTime)) {
+      // Outside the allowed window – skip silently
+      return;
+    }
   }
 
   // Find an existing portal tab; otherwise open a new one

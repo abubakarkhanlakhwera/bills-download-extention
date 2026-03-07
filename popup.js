@@ -28,6 +28,28 @@ function clearStatus() {
 }
 
 /* ────────────────────────────────────────
+   Running-state UI helper
+──────────────────────────────────────── */
+function setRunningState(running, paused = false) {
+  const ctrlRow  = document.getElementById('ctrlRow');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const dlBtn    = document.getElementById('downloadBtn');
+  ctrlRow.style.display = running ? 'flex' : 'none';
+  dlBtn.disabled = running;
+  if (running) {
+    if (paused) {
+      pauseBtn.innerHTML = '&#9654;&nbsp; Resume';
+      pauseBtn.classList.add('resuming');
+    } else {
+      pauseBtn.innerHTML = '&#9208;&nbsp; Pause';
+      pauseBtn.classList.remove('resuming');
+    }
+  } else {
+    pauseBtn.classList.remove('resuming');
+  }
+}
+
+/* ────────────────────────────────────────
    Build <option> elements in a <select>
 ──────────────────────────────────────── */
 function populateSelect(selectEl, options, savedValue) {
@@ -393,16 +415,39 @@ document.getElementById('downloadBtn').addEventListener('click', async () => {
         }
         if (response && response.success) {
           showStatus('Automation started! File will download to the WaterBills folder.', 'success');
+          setRunningState(true); // keep download btn disabled until automation ends
         } else {
           showStatus('Automation error: ' + (response?.error || 'Unknown error.'), 'error');
+          downloadBtn.disabled = false;
         }
-        downloadBtn.disabled = false;
       }
     );
   } catch (e) {
     showStatus('Error: ' + e.message, 'error');
     downloadBtn.disabled = false;
   }
+});
+
+/* ────────────────────────────────────────
+   Stop / Pause button handlers
+──────────────────────────────────────── */
+document.getElementById('stopBtn').addEventListener('click', async () => {
+  await new Promise(r => chrome.storage.local.set({ wbdStop: true }, r));
+  setRunningState(false);
+  showStatus('Automation stopped.', 'info');
+  setTimeout(clearStatus, 3000);
+});
+
+document.getElementById('pauseBtn').addEventListener('click', async () => {
+  const data = await new Promise(r => chrome.storage.local.get(['wbdPaused'], r));
+  const nowPaused = !data.wbdPaused;
+  await new Promise(r => chrome.storage.local.set({ wbdPaused: nowPaused }, r));
+  setRunningState(true, nowPaused);
+  showStatus(
+    nowPaused ? 'Automation paused. Click Resume to continue.' : 'Resuming automation…',
+    nowPaused ? 'info' : 'running'
+  );
+  if (!nowPaused) setTimeout(clearStatus, 2000);
 });
 
 /* ────────────────────────────────────────
@@ -448,9 +493,11 @@ async function updateNextRunDisplay() {
 async function loadSchedulerSettings() {
   const data = await new Promise(r => chrome.storage.local.get(SCHEDULE_KEY, r));
   const s = data[SCHEDULE_KEY] || { enabled: false, interval: 24, unit: 'hours' };
-  document.getElementById('scheduleEnabled').checked = s.enabled;
-  document.getElementById('scheduleInterval').value  = s.interval;
-  document.getElementById('scheduleUnit').value      = s.unit;
+  document.getElementById('scheduleEnabled').checked   = s.enabled;
+  document.getElementById('scheduleInterval').value    = s.interval;
+  document.getElementById('scheduleUnit').value        = s.unit;
+  document.getElementById('scheduleStartTime').value   = s.startTime || '00:00';
+  document.getElementById('scheduleEndTime').value     = s.endTime   || '23:59';
   if (s.enabled) {
     document.getElementById('schedulerBody').classList.add('visible');
     await updateNextRunDisplay();
@@ -459,9 +506,11 @@ async function loadSchedulerSettings() {
 
 async function persistSchedulerSettings() {
   const s = {
-    enabled:  document.getElementById('scheduleEnabled').checked,
-    interval: parseInt(document.getElementById('scheduleInterval').value, 10) || 24,
-    unit:     document.getElementById('scheduleUnit').value,
+    enabled:   document.getElementById('scheduleEnabled').checked,
+    interval:  parseInt(document.getElementById('scheduleInterval').value, 10) || 24,
+    unit:      document.getElementById('scheduleUnit').value,
+    startTime: document.getElementById('scheduleStartTime').value || '00:00',
+    endTime:   document.getElementById('scheduleEndTime').value   || '23:59',
   };
   await new Promise(r => chrome.storage.local.set({ [SCHEDULE_KEY]: s }, r));
   return s;
@@ -490,7 +539,7 @@ document.getElementById('scheduleEnabled').addEventListener('change', async () =
   setTimeout(clearStatus, 4000);
 });
 
-['scheduleInterval', 'scheduleUnit'].forEach(id => {
+['scheduleInterval', 'scheduleUnit', 'scheduleStartTime', 'scheduleEndTime'].forEach(id => {
   document.getElementById(id).addEventListener('change', async () => {
     const s = await persistSchedulerSettings();
     if (s.enabled) await applySchedule(s.interval, s.unit);
@@ -498,8 +547,52 @@ document.getElementById('scheduleEnabled').addEventListener('change', async () =
 });
 
 /* ────────────────────────────────────────
+   Download Log
+──────────────────────────────────────── */
+async function loadDownloadLog() {
+  const data = await new Promise(r => chrome.storage.local.get('waterBillDownloadLog', r));
+  const log  = data.waterBillDownloadLog || [];
+  const container = document.getElementById('downloadLog');
+  const badge     = document.getElementById('logBadge');
+
+  if (log.length === 0) {
+    container.innerHTML = '<div class="log-empty">No downloads recorded yet.</div>';
+    badge.style.display = 'none';
+    return;
+  }
+
+  badge.textContent   = log.length;
+  badge.style.display = 'inline';
+
+  container.innerHTML = log.map(entry => {
+    let timeStr = entry.timestamp;
+    try { timeStr = new Date(entry.timestamp).toLocaleString(); } catch (_) {}
+    // Sanitise: only display plain text (no HTML)
+    const safeTime = timeStr.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeFile = (entry.filename || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<div class="log-entry"><div class="log-time">${safeTime}</div><div class="log-file">${safeFile}</div></div>`;
+  }).join('');
+}
+
+/* ────────────────────────────────────────
    Init
 ──────────────────────────────────────── */
 bindChangeListeners();
 loadOptions(true);
 loadSchedulerSettings();
+loadDownloadLog();
+
+// Restore stop/pause UI if automation was already running when popup opened
+chrome.storage.session.get(['wbdRunning', 'wbdPaused'], data => {
+  if (data.wbdRunning) setRunningState(true, data.wbdPaused || false);
+});
+
+// Live-refresh log and running state on any storage changes
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.waterBillDownloadLog) loadDownloadLog();
+  if (area === 'local' && ('wbdRunning' in changes || 'wbdPaused' in changes)) {
+    chrome.storage.local.get(['wbdRunning', 'wbdPaused'], data => {
+      setRunningState(data.wbdRunning || false, data.wbdPaused || false);
+    });
+  }
+});

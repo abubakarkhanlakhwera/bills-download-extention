@@ -111,6 +111,28 @@
     .btn-save:hover:not(:disabled) { background: #d5cde8; }
     .btn-save.saved { background: #e6f4ea !important; color: #1e7e34 !important; }
 
+    /* ── Stop / Pause controls ── */
+    .ctrl-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-stop {
+      background: #fce8e6;
+      color: #c0392b;
+    }
+    .btn-stop:hover:not(:disabled) { background: #f5c6cb; }
+    .btn-pause {
+      background: #fff3cd;
+      color: #856404;
+    }
+    .btn-pause:hover:not(:disabled) { background: #ffe69c; }
+    .btn-pause.resuming {
+      background: #e8f4ea;
+      color: #1e7e34;
+    }
+    .btn-pause.resuming:hover:not(:disabled) { background: #c3e6cb; }
+
     /* ── Scheduler ── */
     .scheduler-section { margin-top: 2px; }
     .scheduler-toggle {
@@ -171,6 +193,75 @@
       font-size: 11px;
       color: #555;
       font-style: italic;
+    }
+    .scheduler-time-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .sched-time {
+      width: 86px;
+      padding: 5px 7px;
+      border: 1.5px solid #d1d5e0;
+      border-radius: 5px;
+      font-size: 13px;
+      text-align: center;
+      background: #fff;
+    }
+    .sched-time:focus { outline: none; border-color: #3d2b5e; }
+    .scheduler-range-hint {
+      margin-top: 5px;
+      font-size: 10.5px;
+      color: #888;
+      font-style: italic;
+    }
+
+    /* ── Download Log ── */
+    .log-section { margin-top: 2px; }
+    .log-header {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #4a4a6a;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 7px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .log-badge {
+      background: #3d2b5e;
+      color: #fff;
+      border-radius: 10px;
+      padding: 1px 7px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .log-list { display: flex; flex-direction: column; gap: 5px; }
+    .log-entry {
+      background: #f0ebfa;
+      border-left: 3px solid #3d2b5e;
+      border-radius: 4px;
+      padding: 5px 9px;
+    }
+    .log-entry .log-time {
+      font-size: 10px;
+      color: #666;
+      font-weight: 600;
+      margin-bottom: 1px;
+    }
+    .log-entry .log-file {
+      font-size: 11.5px;
+      color: #222;
+      word-break: break-all;
+    }
+    .log-empty {
+      font-size: 11.5px;
+      color: #aaa;
+      font-style: italic;
+      text-align: center;
+      padding: 8px 0;
     }
 
     /* ── Status bar ── */
@@ -239,6 +330,11 @@
 
     <button class="btn btn-save" id="saveBtn">&#128190;&nbsp; Save Settings</button>
 
+    <div class="ctrl-row" id="ctrlRow" style="display:none">
+      <button class="btn btn-pause" id="pauseBtn">&#9208;&nbsp; Pause</button>
+      <button class="btn btn-stop"  id="stopBtn" >&#9209;&nbsp; Stop</button>
+    </div>
+
     <div class="status" id="status"></div>
 
     <hr class="divider" />
@@ -259,6 +355,22 @@
           </select>
         </div>
         <div class="scheduler-next" id="schedulerNext"></div>
+        <div class="scheduler-time-row">
+          <span class="sched-label">From</span>
+          <input type="time" id="scheduleStartTime" class="sched-time" value="00:00" title="Start of active window" />
+          <span class="sched-label">to</span>
+          <input type="time" id="scheduleEndTime" class="sched-time" value="23:59" title="End of active window" />
+        </div>
+        <div class="scheduler-range-hint">Only triggers within this time window</div>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <div class="log-section">
+      <div class="log-header">&#128196; Download Log <span class="log-badge" id="logBadge" style="display:none"></span></div>
+      <div id="downloadLog" class="log-list">
+        <div class="log-empty">No downloads recorded yet.</div>
       </div>
     </div>
 
